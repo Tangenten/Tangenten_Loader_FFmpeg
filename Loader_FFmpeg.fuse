@@ -1,0 +1,1032 @@
+--[[
+License:
+Copyright (c) 2026 Tangenten. All rights reserved.
+Licensed per individual user. See License.txt for full terms.
+
+Third-party licenses:
+- FFmpeg/libav: LGPLv2.1+/GPLv2.0 depending on the user-provided build.
+You are responsible for complying with their respective licenses.
+
+Tool:    Loader_FFmpeg (Loader (FFmpeg))
+Purpose: Video playback through a fuse-local LibAV bridge.
+Author:  Tangenten
+]]
+
+local RUNNING_IN_FUSION = FuRegisterClass ~= nil
+
+local TOOL_ID = "Loader_FFmpeg"
+local TOOL_TYPE = CT_Tool
+local TOOL_NAME = "Loader (FFmpeg)"
+local TOOL_DESCRIPTION = "Loads video frames through fuse-local FFmpeg/libav libraries"
+local TOOL_ABBREVIATION = "LDFF"
+local TOOL_DEVELOPER = "Tangenten"
+local TOOL_DEVELOPER_WEBSITE = "https://tangenten.xyz"
+local TOOL_VERSION = "0.2.0"
+
+local TOOL_PUBLISHED = false
+local TOOL_ENABLE_LOGGING = not TOOL_PUBLISHED
+local TOOL_RUN_TESTS_ON_STARTUP = not TOOL_PUBLISHED
+
+LOADER_LIBAV = LOADER_LIBAV
+LOADER_LIBAV_ERROR = LOADER_LIBAV_ERROR
+LOADER_DECODER = LOADER_DECODER
+LOADER_DECODER_PATH = LOADER_DECODER_PATH
+LOADER_STATUS_HTML = LOADER_STATUS_HTML
+
+--region Logging
+local function stringifyArgs(...)
+	local parts = {}
+	for i = 1, select("#", ...) do
+		local v = select(i, ...)
+		if type(v) == "table" then
+			local tableParts = {}
+			for k, value in pairs(v) do
+				tableParts[#tableParts + 1] = tostring(k) .. "=" .. tostring(value)
+			end
+			parts[i] = "{" .. table.concat(tableParts, ", ") .. "}"
+		else
+			parts[i] = tostring(v)
+		end
+	end
+
+	return table.concat(parts, " ")
+end
+
+if not dump then
+	dump = function(...)
+		print(stringifyArgs(...))
+	end
+end
+
+local function logInfo(...)
+	if not TOOL_ENABLE_LOGGING then return end
+	dump("[" .. TOOL_NAME .. "]", ...)
+end
+
+local function logCritical(...)
+	dump("[" .. TOOL_NAME .. "]", ...)
+end
+
+local function logError(...)
+	error("[" .. TOOL_NAME .. "] " .. stringifyArgs(...), 2)
+end
+
+local function logAssert(condition, ...)
+	if not condition then
+		logError(...)
+	end
+end
+--endregion Logging
+
+--region Paths
+local function getPathSeparator()
+	return package.config:sub(1, 1)
+end
+
+local function getFuseDir()
+	local sourceFile = debug.getinfo(1).source
+	if sourceFile:sub(1, 1) == "@" then
+		sourceFile = sourceFile:sub(2)
+	end
+
+	local fuseDir = sourceFile:match("^(.+)[/\\][^/\\]+$")
+	if fuseDir then
+		return fuseDir
+	end
+
+	logError("Fuse dir not found")
+end
+
+local function fileExists(path)
+	if not path or path == "" then
+		return false
+	end
+
+	local f = io.open(path, "rb")
+	if f then
+		f:close()
+		return true
+	end
+
+	return false
+end
+
+local function mapCompPath(comp, path)
+	if not path or path == "" then
+		logInfo("[path] Empty input path")
+		return ""
+	end
+
+	if comp and comp.MapPath then
+		local ok, mapped = pcall(function()
+			return comp:MapPath(path)
+		end)
+		if ok and mapped and mapped ~= "" then
+			if mapped ~= path then
+				logInfo("[path] Mapped", path, "->", mapped)
+			else
+				logInfo("[path] Path did not need mapping", path)
+			end
+			return mapped
+		end
+		if not ok then
+			logInfo("[path] MapPath failed, using raw path:", tostring(mapped))
+		end
+	end
+
+	logInfo("[path] Using raw path", path)
+	return path
+end
+--endregion Paths
+
+--region Pure helpers
+local function clamp(v, lo, hi)
+	if v < lo then return lo end
+	if v > hi then return hi end
+	return v
+end
+
+local function umod(a, n)
+	if n <= 0 then return 0 end
+	local r = a % n
+	if r < 0 then r = r + n end
+	return r
+end
+
+local function pingpong(i, n)
+	if n <= 1 then return 0 end
+	local len = (n * 2) - 2
+	local m = umod(i, len)
+	if m >= n then return len - m end
+	return m
+end
+
+local function roundToInt(v)
+	return math.floor(v + 0.5)
+end
+
+local function getCompFrameRate(comp)
+	local fps
+	if comp then
+		local ok, v = pcall(function() return comp:GetPrefs("Comp.FrameFormat.Rate") end)
+		if ok and type(v) == "number" and v > 0 then fps = v end
+
+		if not fps then
+			local ok2, t = pcall(function() return comp:GetPrefs("Comp.FrameFormat") end)
+			if ok2 and type(t) == "table" and type(t.Rate) == "number" and t.Rate > 0 then
+				fps = t.Rate
+			end
+		end
+
+		if not fps then
+			local ok3, attrs = pcall(function() return comp:GetAttrs() end)
+			if ok3 and type(attrs) == "table" then
+				if type(attrs.COMPN_GlobalFPS) == "number" and attrs.COMPN_GlobalFPS > 0 then
+					fps = attrs.COMPN_GlobalFPS
+				elseif type(attrs.COMPN_FrameRate) == "number" and attrs.COMPN_FrameRate > 0 then
+					fps = attrs.COMPN_FrameRate
+				end
+			end
+		end
+	end
+
+	return (type(fps) == "number" and fps > 0) and fps or 24.0
+end
+
+local function escapeHtml(text)
+	text = tostring(text or "")
+	text = text:gsub("&", "&amp;")
+	text = text:gsub("<", "&lt;")
+	text = text:gsub(">", "&gt;")
+	text = text:gsub('"', "&quot;")
+	return text
+end
+
+local function formatSeconds(seconds)
+	if not seconds or seconds <= 0 then
+		return "unknown"
+	end
+
+	return string.format("%.3fs", seconds)
+end
+
+local function formatFps(fps)
+	if not fps or fps <= 0 then
+		return "unknown"
+	end
+
+	return string.format("%.6g", fps)
+end
+
+local function getInfoFrameCount(info)
+	if not info then return 0 end
+	if info.frameCount and info.frameCount > 0 then
+		return roundToInt(info.frameCount)
+	end
+	if info.duration and info.duration > 0 and info.fps and info.fps > 0 then
+		return math.max(1, roundToInt(info.duration * info.fps))
+	end
+
+	return 0
+end
+
+local function computeFrameIndex(req, info, comp)
+	local frameCount = getInfoFrameCount(info)
+	if frameCount <= 0 then
+		logInfo("[frame-map] Unknown frame count; using frame 0", "time", req.Time)
+		return 0, false
+	end
+
+	local maxFrame = frameCount - 1
+	local playbackMode = math.floor((InPlaybackMode:GetValue(req).Value or 0) + 0.5)
+	local playbackFps = InPlaybackFPS:GetValue(req).Value or 0
+	local reverse = (InReverse:GetValue(req).Value or 0) >= 0.5
+	local loopMode = math.floor((InLoopMode:GetValue(req).Value or 0) + 0.5)
+	local startFrame = math.max(0, roundToInt(InStartFrame:GetValue(req).Value or 0))
+	local endFrame = math.max(0, roundToInt(InEndFrame:GetValue(req).Value or 0))
+	local manualFrame = math.max(0, roundToInt(InManualFrame:GetValue(req).Value or 0))
+
+	local startIdx = clamp(startFrame, 0, maxFrame)
+	local endIdx = endFrame == 0 and maxFrame or clamp(endFrame - 1, startIdx, maxFrame)
+	local subsetFrameCount = math.max(1, endIdx - startIdx + 1)
+
+	local idxInSubset = 0
+	local blank = false
+	if playbackMode == 1 then
+		idxInSubset = clamp(manualFrame, 0, subsetFrameCount - 1)
+		logInfo("[frame-map] Manual", "time", req.Time, "manualFrame", manualFrame, "start", startIdx, "end", endIdx, "idxInSubset", idxInSubset)
+	else
+		local compFps = getCompFrameRate(comp)
+		local sourceFps = info.fps and info.fps > 0 and info.fps or compFps
+		local rate = playbackFps > 0 and playbackFps or sourceFps
+		local logical = math.floor(((req.Time or 0) * (rate / compFps)) + 0.000001)
+		if logical < 0 then logical = 0 end
+		logInfo("[frame-map] Auto inputs", "time", req.Time, "compFps", compFps, "sourceFps", sourceFps, "playbackFps", playbackFps, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
+
+		if loopMode == 0 then
+			idxInSubset = umod(logical, subsetFrameCount)
+		elseif loopMode == 1 then
+			idxInSubset = pingpong(logical, subsetFrameCount)
+		elseif loopMode == 2 then
+			idxInSubset = logical >= subsetFrameCount and (subsetFrameCount - 1) or logical
+		else
+			if logical >= subsetFrameCount then
+				blank = true
+			else
+				idxInSubset = logical
+			end
+		end
+	end
+
+	if reverse then
+		idxInSubset = (subsetFrameCount - 1) - idxInSubset
+	end
+
+	local frameIndex = startIdx + idxInSubset
+	logInfo("[frame-map] Result", "time", req.Time, "frameIndex", frameIndex, "idxInSubset", idxInSubset, "subsetFrameCount", subsetFrameCount, "blank", blank)
+	return frameIndex, blank
+end
+--endregion Pure helpers
+
+--region LibAV state
+local function closeDecoder()
+	if LOADER_DECODER and LOADER_DECODER.close then
+		logInfo("[decode] Closing decoder", LOADER_DECODER_PATH or "<unknown>")
+		local ok, err = pcall(function()
+			LOADER_DECODER:close()
+		end)
+		if not ok then
+			logInfo("[decode] close failed:", tostring(err))
+		end
+	end
+
+	LOADER_DECODER = nil
+	LOADER_DECODER_PATH = nil
+	logInfo("[decode] Decoder state cleared")
+end
+
+local function loadLibAV()
+	if LOADER_LIBAV then
+		if LOADER_LIBAV.bridgeAbi == "abi2" then
+			logInfo("[libav] Reusing loaded bridge", LOADER_LIBAV.version(), "path", LOADER_LIBAV.bridgePath or "<unknown>")
+			return LOADER_LIBAV
+		end
+
+		logInfo("[libav] Dropping cached bridge without ABI2 tag", "path", LOADER_LIBAV.bridgePath or "<unknown>")
+		LOADER_LIBAV = nil
+	end
+	if LOADER_LIBAV_ERROR then
+		logInfo("[libav] Returning cached bridge error", LOADER_LIBAV_ERROR)
+		return nil, LOADER_LIBAV_ERROR
+	end
+
+	local sep = getPathSeparator()
+	local ffiPath = getFuseDir() .. sep .. "LibAV" .. sep .. "LibAV_FFI.lua"
+	logInfo("[libav] Loading FFI wrapper", ffiPath)
+	local ok, buildLibAV = pcall(dofile, ffiPath)
+	if not ok then
+		LOADER_LIBAV_ERROR = "Failed to load LibAV_FFI.lua: " .. tostring(buildLibAV)
+		logInfo("[libav] FFI wrapper failed", LOADER_LIBAV_ERROR)
+		return nil, LOADER_LIBAV_ERROR
+	end
+
+	logInfo("[libav] Building bridge from fuse dir", getFuseDir())
+	local libAV, err = buildLibAV(getFuseDir())
+	if not libAV then
+		LOADER_LIBAV_ERROR = tostring(err)
+		logInfo("[libav] Bridge build failed", LOADER_LIBAV_ERROR)
+		return nil, LOADER_LIBAV_ERROR
+	end
+
+	LOADER_LIBAV = libAV
+	logInfo("[libav] Loaded", libAV.version(), "dir", libAV.libDir or "<unknown>", "bridge", libAV.bridgePath or "<unknown>", "abi", libAV.bridgeAbi or "<unknown>")
+	return LOADER_LIBAV
+end
+
+local function ensureDecoder(path)
+	if LOADER_DECODER and LOADER_DECODER_PATH == path then
+		if LOADER_LIBAV and LOADER_LIBAV.bridgeAbi == "abi2" then
+			logInfo("[decode] Reusing decoder", path)
+			return LOADER_DECODER
+		end
+
+		logInfo("[decode] Dropping cached decoder without ABI2 bridge", path)
+		closeDecoder()
+	end
+
+	closeDecoder()
+
+	local libAV, err = loadLibAV()
+	if not libAV then
+		return nil, err
+	end
+
+	local decoder, openErr = libAV.open(path)
+	if not decoder then
+		logInfo("[decode] Open failed", path, openErr, "bridgeDebug", libAV.lastDebug and libAV.lastDebug() or "")
+		return nil, openErr
+	end
+
+	LOADER_DECODER = decoder
+	LOADER_DECODER_PATH = path
+	logInfo("[decode] Opened", path, "bridgeDebug", libAV.lastDebug and libAV.lastDebug() or "")
+	logInfo("[decode] Metadata", "width", decoder.info.width, "height", decoder.info.height, "fps", decoder.info.fps, "frames", decoder.info.frameCount, "duration", decoder.info.duration, "codec", decoder.info.codecName, "pix", decoder.info.pixelFormat, "format", decoder.info.formatName)
+	return LOADER_DECODER
+end
+--endregion LibAV state
+
+--region Fusion image/status
+local function makeStatusHtml(title, lines, isError)
+	local color = isError and "#c8896a" or "#9fb7c9"
+	local html = "<span style='color:" .. color .. ";'><b>" .. escapeHtml(title) .. "</b>"
+	for i = 1, #lines do
+		html = html .. "<br>" .. escapeHtml(lines[i])
+	end
+	return html .. "</span>"
+end
+
+local function setStatusHtml(html)
+	if not RUNNING_IN_FUSION or not InMetadataStatus then
+		return
+	end
+	if LOADER_STATUS_HTML == html then
+		logInfo("[status] Unchanged")
+		return
+	end
+
+	LOADER_STATUS_HTML = html
+	logInfo("[status] Updating metadata label", html)
+	InMetadataStatus:SetAttrs({ LINKS_Name = html })
+end
+
+local function setInfoStatus(info, path)
+	local frameCount = getInfoFrameCount(info)
+	setStatusHtml(makeStatusHtml("Video loaded", {
+		string.format("Path: %s", path),
+		string.format("Resolution: %d x %d", info.width or 0, info.height or 0),
+		string.format("Frame rate: %s", formatFps(info.fps)),
+		string.format("Frames: %s", frameCount > 0 and tostring(frameCount) or "unknown"),
+		string.format("Duration: %s", formatSeconds(info.duration)),
+		string.format("Codec: %s", info.codecName ~= "" and info.codecName or "unknown"),
+		string.format("Pixel format: %s", info.pixelFormat ~= "" and info.pixelFormat or "unknown"),
+		string.format("Decoding: %s", (info.hwAccel and info.hwAccel ~= "") and ("Hardware (" .. string.upper(info.hwAccel) .. ")") or "Software"),
+	}, false))
+end
+
+local function setErrorStatus(title, detail)
+	setStatusHtml(makeStatusHtml(title, { tostring(detail or "") }, true))
+end
+
+local function createImage(tool, req, width, height, noData)
+	local attrs = {
+		IMG_Document = tool.Comp,
+		{ IMG_Channel = "Red" },
+		{ IMG_Channel = "Green" },
+		{ IMG_Channel = "Blue" },
+		{ IMG_Channel = "Alpha" },
+		IMG_Width = math.max(1, math.floor(width or 1)),
+		IMG_Height = math.max(1, math.floor(height or 1)),
+		IMG_Depth = 5,
+		IMG_XScale = 1.0,
+		IMG_YScale = 1.0,
+		IMG_Quality = not req:IsQuick(),
+		IMG_MotionBlurQuality = not req:IsNoMotionBlur(),
+	}
+
+	if noData then
+		attrs.IMG_NoData = true
+	end
+
+	return Image(attrs)
+end
+
+local function setNoDataOutput(tool, req, width, height)
+	logInfo("[image] Output no-data", "time", req.Time, "size", tostring(width or 1) .. "x" .. tostring(height or 1))
+	OutImage:Set(req, createImage(tool, req, width or 1, height or 1, true))
+end
+
+local function sampleBytes(ptr, byteCount)
+	if not LOADER_LIBAV or not LOADER_LIBAV.ffi or ptr == nil then
+		return 0
+	end
+
+	local ffi = LOADER_LIBAV.ffi
+	if ptr == ffi.NULL then
+		return 0
+	end
+
+	local data = ffi.cast("const uint8_t*", ptr)
+	local limit = math.min(tonumber(byteCount) or 0, 4096)
+	local sample = 0
+	for i = 0, limit - 1 do
+		sample = (sample + tonumber(data[i]) * ((i % 31) + 1)) % 1000000007
+	end
+
+	return sample
+end
+
+local function copyFrameToImage(outImg, frame)
+	local ffi = LOADER_LIBAV.ffi
+	local width = tonumber(frame.width) or 0
+	local height = tonumber(frame.height) or 0
+	local stride = tonumber(frame.stride) or 0
+	local byteCount = stride * height
+	if width <= 0 or height <= 0 or stride <= 0 then
+		return false, "Invalid frame dimensions " .. tostring(width) .. "x" .. tostring(height) .. " stride " .. tostring(stride)
+	end
+
+	-- GetScanLine() returns a live, writable array of row pointers into the
+	-- image's own pixel memory. The output image is 8-bit RGBA (IMG_Depth 5), so
+	-- the array is uint8_t**. On Resolve (ReFu15+) each scanline is RGBA, matching
+	-- the bridge's AV_PIX_FMT_RGBA output, so rows copy straight across without a
+	-- swizzle. Writing scanlines directly bypasses _FromMemory, which dropped the
+	-- bottom scanline (y=0) regardless of source pointer.
+	local rawScanlines = outImg:GetScanLine()
+	if rawScanlines == nil then
+		return false, "Image:GetScanLine returned nil"
+	end
+	local scanlines = ffi.cast("uint8_t **", rawScanlines)
+	if scanlines == ffi.NULL then
+		return false, "Image:GetScanLine returned a null pointer"
+	end
+
+	-- Fusion stores scanlines bottom-up (scanlines[0] = bottom row); the libav
+	-- frame is top-down (row 0 = top). Map image scanline y <- source row
+	-- (height-1-y) so the picture lands right-side up, writing every row.
+	local srcData = ffi.cast("const uint8_t*", frame.data)
+	local rowBytes = width * 4
+	for y = 0, height - 1 do
+		ffi.copy(scanlines[y], srcData + ((height - 1 - y) * stride), rowBytes)
+	end
+
+	logInfo("[image] Wrote scanlines", "frame", tonumber(frame.frame_index), "size", width .. "x" .. height, "stride", stride, "rowBytes", rowBytes, "srcPtr", tostring(frame.data), "srcSample", sampleBytes(frame.data, byteCount))
+	return true
+end
+--endregion Fusion image/status
+
+--region Registration
+if RUNNING_IN_FUSION then
+	FuRegisterClass(TOOL_ID, TOOL_TYPE, {
+		REGS_Name = TOOL_NAME,
+		REGS_Category = TOOL_DEVELOPER,
+		REGS_OpIconString = TOOL_ABBREVIATION,
+		REGS_Company = TOOL_DEVELOPER,
+		REGS_OpDescription = TOOL_DESCRIPTION,
+		REGS_AboutDescription = TOOL_DESCRIPTION,
+		REGS_OpToolTip = TOOL_DESCRIPTION,
+		REGS_HelpTopic = TOOL_DEVELOPER_WEBSITE,
+		REGS_URL = TOOL_DEVELOPER_WEBSITE,
+		REGS_IconID = "Icons.Tools.Icons.MultiPoly",
+
+		REG_OpNoMask = true,
+		REG_NoBlendCtrls = true,
+		REG_NoObjMatCtrls = true,
+		REG_NoChannelCtrls = true,
+		REG_NoScriptCtrls = true,
+		REG_NoMotionBlurCtrls = true,
+		REG_NoCommonCtrls = true,
+		REG_NoAuxChannels = true,
+		REG_NoLinkCtrls = true,
+
+		REG_TimeVariant = true,
+		REG_Temporal = true,
+
+		REG_Fuse_NoEdit = true,
+		REG_Fuse_NoReload = TOOL_PUBLISHED,
+	})
+end
+--endregion Registration
+
+--region Create
+function Create()
+	self:RemoveControlPage("Controls")
+	self:AddControlPage("Controls", { CTID_DIB_ID = "Icons.Tools.Tabs.Image" })
+
+	OutImage = self:AddOutput("Output", "Output", {
+		LINKID_DataType = "Image",
+		LINK_Main = 1,
+		IMG_DeferAlloc = true,
+		INP_AcceptsGPUImages = true,
+	})
+
+	InSectionInput = self:AddInput("", "SectionInput", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = "<b style='color:#b8c8d8;'>Input</b>",
+		INP_Default = 1.0,
+		LBLC_DropDownButton = true,
+		LBLC_NumInputs = 2,
+		LBLC_NestLevel = 1,
+		IC_ControlPage = 0,
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+	})
+
+	InInputPath = self:AddInput("Video Path", "InputPath", {
+		INPID_InputControl = "FileControl",
+		LINKID_DataType = "Text",
+		LINKS_Name = "Path",
+		IC_ControlPage = 0,
+		FC_IsSaver = false,
+		FC_ClipBrowse = true,
+		FC_PathBrowse = false,
+		FCS_FilterString = "Video Files (*.mov *.mp4 *.mkv *.avi *.webm *.m4v)|*.mov;*.mp4;*.mkv;*.avi;*.webm;*.m4v|All Files (*.*)|*.*|",
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_External = false,
+	})
+
+	InMetadataStatus = self:AddInput("", "MetadataStatus", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = makeStatusHtml("No video loaded", { "Choose a video path and render a frame." }, false),
+		IC_ControlPage = 0,
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		INP_Active = false,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+		LBLC_MultiLine = true,
+	})
+
+	InSectionPlayback = self:AddInput("", "SectionPlayback", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = "<b style='color:#c8b8d8;'>Playback</b>",
+		INP_Default = 1.0,
+		LBLC_DropDownButton = true,
+		LBLC_NumInputs = 7,
+		LBLC_NestLevel = 1,
+		IC_ControlPage = 0,
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+	})
+
+	InPlaybackMode = self:AddInput("Playback Mode", "PlaybackMode", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		IC_ControlPage = 0,
+		{ CCS_AddString = "Auto" },
+		{ CCS_AddString = "Manual" },
+	})
+
+	InPlaybackFPS = self:AddInput("Playback FPS (0 = Source)", "PlaybackFPS", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_Default = 0.0,
+		INP_MinScale = 0.0,
+		INP_MaxScale = 120.0,
+		IC_DisplayedPrecision = 3,
+		IC_ControlPage = 0,
+	})
+
+	InReverse = self:AddInput("Reverse Playback", "Reverse", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		IC_ControlPage = 0,
+	})
+
+	InLoopMode = self:AddInput("Loop Behaviour", "LoopMode", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = 2,
+		INP_Integer = true,
+		IC_ControlPage = 0,
+		{ CCS_AddString = "Loop" },
+		{ CCS_AddString = "Ping Pong" },
+		{ CCS_AddString = "Hold Last" },
+		{ CCS_AddString = "Blank" },
+	})
+
+	InStartFrame = self:AddInput("Start Frame", "StartFrame", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_MinScale = 0,
+		INP_MaxScale = 1000,
+		IC_ControlPage = 0,
+	})
+
+	InEndFrame = self:AddInput("End Frame (0 = All)", "EndFrame", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_MinScale = 0,
+		INP_MaxScale = 1000,
+		IC_ControlPage = 0,
+	})
+
+	InManualFrame = self:AddInput("Frame", "ManualFrame", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_MinScale = 0,
+		INP_MaxScale = 1000,
+		IC_ControlPage = 0,
+	})
+
+	InSupportNest = self:AddInput("Support", "SupportNest", {
+		IC_ControlPage = 1,
+		LINKID_DataType = "Number",
+		INPID_InputControl = "LabelControl",
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_Default = 1.0,
+		INP_Passive = true,
+		INP_External = false,
+		INP_Active = false,
+		LBLC_MultiLine = false,
+		LBLC_DropDownButton = true,
+		LBLC_NumInputs = 3,
+	})
+
+	InTestsBtn = self:AddInput("Run Tests", "TestsBtn", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ButtonControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_External = false,
+		IC_ControlPage = 1,
+		ICD_Width = 0.33,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+	})
+
+	InReloadBtn = self:AddInput("Reload Node", "ReloadBtn", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ButtonControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_External = false,
+		IC_ControlPage = 1,
+		ICD_Width = 0.33,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+	})
+
+	InWebsiteBtn = self:AddInput("Visit Website", "WebsiteBtn", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ButtonControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_External = false,
+		IC_ControlPage = 1,
+		ICD_Width = 0.34,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+	})
+
+	InLicenseNest = self:AddInput("License", "LicenseNest", {
+		IC_ControlPage = 1,
+		LINKID_DataType = "Number",
+		INPID_InputControl = "LabelControl",
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_Default = 1.0,
+		INP_Passive = true,
+		INP_External = false,
+		INP_Active = false,
+		LBLC_MultiLine = true,
+		LBLC_DropDownButton = true,
+		LBLC_NumInputs = 2,
+	})
+
+	InLicenseGeneral = self:AddInput("", "LicenseGeneral", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = "<span style='color:#aaa;'>This fuse provides a UI and native bridge for video decoding. It does not contain, ship with, or license video codecs. Video decoding requires user-provided FFmpeg/libav runtime libraries copied into the fuse-local LibAV platform folder.</span>",
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		INP_Active = false,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+		IC_ControlPage = 1,
+		LBLC_MultiLine = true,
+	})
+
+	InLicenseFFmpeg = self:AddInput("", "LicenseFFmpeg", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = "FFmpeg/libav is licensed under LGPL/GPL terms depending on the build and enabled codecs. The original source code is available at <a href='https://ffmpeg.org'>ffmpeg.org</a>.",
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_ForceNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		INP_Active = false,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+		IC_ControlPage = 1,
+		LBLC_MultiLine = true,
+	})
+
+	local footerHtml = string.format(
+		"<p align='right'><span style='color:#666666;'><a href='%s' style='color:#666666;'>%s - %s v%s</a></span></p>",
+		TOOL_DEVELOPER_WEBSITE, TOOL_DEVELOPER, TOOL_NAME, TOOL_VERSION
+	)
+
+	InVersionFooter = self:AddInput("", "VersionFooter", {
+		LINKID_DataType = "Text",
+		INPID_InputControl = "LabelControl",
+		LINKS_Name = footerHtml,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_ForceNotify = false,
+		INP_External = false,
+		INP_Passive = true,
+		IC_NoLabel = true,
+		IC_NoReset = true,
+		IC_ControlPage = 1,
+	})
+end
+--endregion Create
+
+--region NotifyChanged
+local function updatePlaybackVisibility(mode)
+	local manual = math.floor((mode or 0) + 0.5) == 1
+	if InManualFrame then InManualFrame:SetAttrs({ IC_Visible = manual }) end
+	if InPlaybackFPS then InPlaybackFPS:SetAttrs({ IC_Visible = not manual }) end
+	if InReverse then InReverse:SetAttrs({ IC_Visible = not manual }) end
+	if InLoopMode then InLoopMode:SetAttrs({ IC_Visible = not manual }) end
+	if InStartFrame then InStartFrame:SetAttrs({ IC_Visible = true }) end
+	if InEndFrame then InEndFrame:SetAttrs({ IC_Visible = true }) end
+end
+
+local function resetButton(input)
+	if input and Number then
+		input:SetSource(Number(0), 0, 0)
+	end
+end
+
+function NotifyChanged(inp, param, time)
+	if not param then return end
+
+	if inp == InVersionFooter or inp == InLicenseFFmpeg then
+		if bmd and bmd.openurl and param.Value then
+			bmd.openurl(param.Value)
+		end
+		return
+	end
+
+	if inp == InInputPath then
+		closeDecoder()
+		setStatusHtml(makeStatusHtml("Video path changed", { "Render a frame to load metadata." }, false))
+		return
+	end
+
+	if inp == InPlaybackMode then
+		updatePlaybackVisibility(param.Value or 0)
+		return
+	end
+
+	if inp == InTestsBtn and param.Value >= 0.5 then
+		local ok, err = pcall(Tests)
+		if not ok then
+			logInfo("[tests] Tests crashed:", tostring(err))
+		end
+		resetButton(InTestsBtn)
+		return
+	end
+
+	if inp == InReloadBtn and param.Value >= 0.5 then
+		closeDecoder()
+		local execute = string.format([[
+local tool = comp:FindTool(%q)
+if tool == nil then return end
+tool.ScriptReload[fu.TIME_UNDEFINED] = 1
+tool.ScriptReload[fu.TIME_UNDEFINED] = 0
+]], self.Name)
+
+		local ok, err = pcall(function()
+			self.Comp:Execute(execute)
+		end)
+		if not ok then
+			logInfo("[reload] Failed:", tostring(err))
+		end
+		resetButton(InReloadBtn)
+		return
+	end
+
+	if inp == InWebsiteBtn and param.Value >= 0.5 then
+		if bmd and bmd.openurl then
+			bmd.openurl(TOOL_DEVELOPER_WEBSITE)
+		end
+		resetButton(InWebsiteBtn)
+		return
+	end
+end
+--endregion NotifyChanged
+
+--region OnAddToFlow
+function OnAddToFlow()
+	updatePlaybackVisibility(0)
+	if TOOL_RUN_TESTS_ON_STARTUP then
+		Tests()
+	end
+end
+--endregion OnAddToFlow
+
+--region PreCalcProcess
+-- Resolve the output resolution without decoding. ensureDecoder caches by path,
+-- so the file is opened/probed once and every later precalc is a cheap cache
+-- hit; opening only demuxes metadata and never seeks, so it leaves Process's
+-- decode position untouched. Returns nil when there is no usable clip yet.
+local function resolveVideoSize(req, comp)
+	local pathValue = InInputPath and InInputPath:GetValue(req)
+	local inputPath = pathValue and pathValue.Value or ""
+	local mappedPath = mapCompPath(comp, inputPath)
+	if mappedPath == "" or not fileExists(mappedPath) then
+		return nil, nil, mappedPath
+	end
+
+	local decoder = ensureDecoder(mappedPath)
+	if decoder and decoder.info and (decoder.info.width or 0) > 0 and (decoder.info.height or 0) > 0 then
+		return decoder.info.width, decoder.info.height, mappedPath, decoder
+	end
+
+	return nil, nil, mappedPath
+end
+
+function PreCalcProcess(req)
+	local width, height = resolveVideoSize(req, self.Comp)
+	logInfo("[precalc] Output size", "width", width or 1, "height", height or 1)
+	setNoDataOutput(self, req, width or 1, height or 1)
+end
+--endregion PreCalcProcess
+
+--region Process
+function Process(req)
+	logInfo("[process] Start", "time", req.Time, "precalc", req:IsPreCalc(), "quick", req:IsQuick(), "noMotionBlur", req:IsNoMotionBlur())
+	local pathValue = InInputPath:GetValue(req)
+	local inputPath = pathValue and pathValue.Value or ""
+	local mappedPath = mapCompPath(self.Comp, inputPath)
+	logInfo("[process] Path values", "input", inputPath, "mapped", mappedPath)
+
+	if req:IsPreCalc() then
+		local width, height = resolveVideoSize(req, self.Comp)
+		logInfo("[process] Precalc request", "width", width or 1, "height", height or 1)
+		setNoDataOutput(self, req, width or 1, height or 1)
+		return
+	end
+
+	if mappedPath == "" then
+		logInfo("[process] No mapped path")
+		setStatusHtml(makeStatusHtml("No video loaded", { "Choose a video path." }, false))
+		setNoDataOutput(self, req, 1, 1)
+		return
+	end
+
+	if not fileExists(mappedPath) then
+		logInfo("[process] Missing input file", mappedPath)
+		setErrorStatus("Input file missing", mappedPath)
+		setNoDataOutput(self, req, 1, 1)
+		return
+	end
+
+	local decoder, err = ensureDecoder(mappedPath)
+	if not decoder then
+		logInfo("[process] Decoder unavailable", tostring(err))
+		setErrorStatus("LibAV load/open failed", err)
+		setNoDataOutput(self, req, 1, 1)
+		return
+	end
+
+	setInfoStatus(decoder.info, mappedPath)
+
+	local frameIndex, blank = computeFrameIndex(req, decoder.info, self.Comp)
+	logInfo("[process] Frame decision", "time", req.Time, "frameIndex", frameIndex, "blank", blank)
+	if blank then
+		logInfo("[process] Blank frame requested")
+		setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
+		return
+	end
+
+	logInfo("[process] Decoding frame", frameIndex)
+	local frame, decodeErr = decoder:decode(frameIndex)
+	logInfo("[process] Decode result", "ok", frame ~= nil, "err", tostring(decodeErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
+	if not frame then
+		setErrorStatus("Frame decode failed", decodeErr)
+		setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
+		return
+	end
+
+	local outImg = createImage(self, req, frame.width, frame.height, false)
+	logInfo("[process] Created output image", "width", tonumber(frame.width), "height", tonumber(frame.height), "hasGetScanLine", outImg.GetScanLine ~= nil)
+	if not outImg.GetScanLine then
+		setErrorStatus("Image output failed", "Fusion Image:GetScanLine is unavailable")
+		setNoDataOutput(self, req, frame.width, frame.height)
+		return
+	end
+
+	local ok, fromMemoryErr = copyFrameToImage(outImg, frame)
+	if not ok then
+		setErrorStatus("Image output failed", fromMemoryErr)
+		setNoDataOutput(self, req, frame.width, frame.height)
+		return
+	end
+
+	logInfo("[process] Setting output", "time", req.Time, "frameIndex", frameIndex, "reportedFrame", tonumber(frame.frame_index), "width", tonumber(frame.width), "height", tonumber(frame.height))
+	OutImage:Set(req, outImg)
+	logInfo("[process] Done", "time", req.Time, "frameIndex", frameIndex)
+end
+--endregion Process
+
+--region Tests
+function Tests()
+	local failures = 0
+
+	local function ok(name, condition)
+		if condition then
+			logInfo("[tests] OK", name)
+		else
+			failures = failures + 1
+			logCritical("[tests] FAIL", name)
+		end
+	end
+
+	ok("clamp low", clamp(-1, 0, 2) == 0)
+	ok("clamp high", clamp(3, 0, 2) == 2)
+	ok("umod negative", umod(-1, 4) == 3)
+	ok("pingpong forward", pingpong(3, 4) == 3)
+	ok("pingpong reverse", pingpong(4, 4) == 2)
+	ok("html escape", escapeHtml([[<&">]]) == "&lt;&amp;&quot;&gt;")
+	ok("frame count estimate", getInfoFrameCount({ frameCount = 0, duration = 2, fps = 24 }) == 48)
+
+	if failures > 0 then
+		logError(failures, "test(s) failed")
+	end
+
+	logInfo("[tests] All tests passed")
+end
+
+if not RUNNING_IN_FUSION and TOOL_RUN_TESTS_ON_STARTUP then
+	Tests()
+end
+--endregion Tests

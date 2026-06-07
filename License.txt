@@ -1,0 +1,17 @@
+Copyright (c) 2026 Tangenten. All rights reserved.
+
+Licensed per individual user. Redistribution, sublicensing, or resale is not
+permitted unless explicitly granted by Tangenten in writing.
+
+Third-party software
+--------------------
+
+This fuse can use FFmpeg/libav runtime libraries supplied by the user.
+FFmpeg/libav is licensed under LGPL/GPL terms depending on the exact build,
+enabled codecs, and linked libraries. The original source code is available at:
+
+  https://ffmpeg.org
+
+This repository does not include FFmpeg/libav runtime binaries. Users are
+responsible for complying with all applicable third-party licenses and patent
+requirements for the binaries they provide.
