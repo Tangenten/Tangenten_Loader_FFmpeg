@@ -20,14 +20,15 @@ jobs:
   build-linux:
     name: Linux x86_64
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install FFmpeg development headers
+      - name: Install build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev pkg-config
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel ffmpeg pkg-config
 
       - name: Build bridge
         run: cd LibAV && bash build_linux.sh
