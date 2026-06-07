@@ -101,3 +101,38 @@ jobs:
         with:
           name: libav-bridge-windows-x86_64
           path: LibAV/windows_x86_64/
+
+  commit-binaries:
+    name: Commit bridge binaries
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [build-linux, build-macos-x86_64, build-macos-arm64, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Place binaries into repo
+        run: |
+          mkdir -p LibAV/linux_x86_64 LibAV/mac_x86_64 LibAV/mac_arm64 LibAV/windows_x86_64
+          cp artifacts/libav-bridge-linux-x86_64/*.so* LibAV/linux_x86_64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-macos-x86_64/*.dylib LibAV/mac_x86_64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-macos-arm64/*.dylib LibAV/mac_arm64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-windows-x86_64/*.dll LibAV/windows_x86_64/ 2>/dev/null || true
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f LibAV/*/libav_bridge.*
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git commit -m "update bridge binaries [skip ci]"
+            git push
+          fi
