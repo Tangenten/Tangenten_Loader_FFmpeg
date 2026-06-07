@@ -90,12 +90,12 @@ end
 
 local function bridgeFileName()
 	if ffi.os == "Windows" then
-		return "tangenten_libav_bridge.dll"
+		return "libav_bridge.dll"
 	elseif ffi.os == "OSX" then
-		return "libtangenten_libav_bridge.dylib"
+		return "libav_bridge.dylib"
 	end
 
-	return "libtangenten_libav_bridge.so"
+	return "libav_bridge.so"
 end
 
 local function fileExists(path)

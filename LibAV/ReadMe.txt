@@ -34,7 +34,7 @@ platform.
 
 Linux example runtime files:
 
-  libtangenten_libav_bridge.so
+  libav_bridge.so
   libavformat.so.62
   libavcodec.so.62
   libavutil.so.60

@@ -1,4 +1,4 @@
-# Build the Tangenten LibAV bridge (tangenten_libav_bridge) across platforms.
+# Build the Tangenten LibAV bridge (libav_bridge) across platforms.
 #
 # Produces per-platform artifacts:
 #   Linux   -> linux_x86_64/*.so

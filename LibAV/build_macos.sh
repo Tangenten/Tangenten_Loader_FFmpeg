@@ -33,7 +33,7 @@ cflags="$(pkg-config --cflags libavformat libavcodec libavutil libswscale 2>/dev
 build_arch() {
 	local arch="$1"
 	local out_dir="$(echo "$TLAV_OUT_DIR_TEMPLATE" | sed "s/%a/$arch/g")"
-	local out_path="$out_dir/libtangenten_libav_bridge.dylib"
+	local out_path="$out_dir/libav_bridge.dylib"
 	mkdir -p "$out_dir"
 
 	cc -O2 -fPIC -dynamiclib -arch "$arch" -Wall -Wextra \

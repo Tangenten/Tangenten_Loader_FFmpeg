@@ -11,7 +11,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${TLAV_OUT_DIR:=$script_dir/linux_x86_64}"
 
 out_dir="$TLAV_OUT_DIR"
-out_path="$out_dir/libtangenten_libav_bridge.so"
+out_path="$out_dir/libav_bridge.so"
 mkdir -p "$out_dir"
 
 cc -O2 -fPIC -shared -Wall -Wextra \

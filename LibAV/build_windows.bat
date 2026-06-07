@@ -44,18 +44,18 @@ if errorlevel 1 (
 
 if not exist "%out_dir%" mkdir "%out_dir%"
 
-set "out_path=%out_dir%\tangenten_libav_bridge.dll"
+set "out_path=%out_dir%\libav_bridge.dll"
 
 cl /nologo /O2 /MD /W3 /TC /std:c11 ^
 	/I"%FFMPEG_DIR%\include" ^
 	/LD "%script_dir%tangenten_libav_bridge.c" ^
-	/Fo:"%out_dir%\tangenten_libav_bridge.obj" ^
+	/Fo:"%out_dir%\libav_bridge.obj" ^
 	/Fe:"%out_path%"
 if errorlevel 1 exit /b 1
 
 rem Drop MSVC intermediates, keep only the DLL.
-del /q "%out_dir%\tangenten_libav_bridge.obj" 2>nul
-del /q "%out_dir%\tangenten_libav_bridge.exp" 2>nul
-del /q "%out_dir%\tangenten_libav_bridge.lib" 2>nul
+del /q "%out_dir%\libav_bridge.obj" 2>nul
+del /q "%out_dir%\libav_bridge.exp" 2>nul
+del /q "%out_dir%\libav_bridge.lib" 2>nul
 
 echo built %out_path%
