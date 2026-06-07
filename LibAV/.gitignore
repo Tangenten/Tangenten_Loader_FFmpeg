@@ -1,4 +1,14 @@
-# Compiled bridge binaries and FFmpeg runtime libraries (rebuilt/user-supplied)
-**/*.so*
-**/*.dll
-**/*.dylib
+# FFmpeg/libav runtime libraries (user-supplied) — NOT our bridge binaries
+**/libav*.so*
+**/libswscale*.so*
+**/libswresample*.so*
+**/libav*.dylib
+**/libswscale*.dylib
+**/libswresample*.dylib
+**/avcodec-*.dll
+**/avdevice-*.dll
+**/avfilter-*.dll
+**/avformat-*.dll
+**/avutil-*.dll
+**/swscale-*.dll
+**/swresample-*.dll
