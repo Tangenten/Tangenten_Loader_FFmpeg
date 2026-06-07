@@ -83,7 +83,7 @@ jobs:
       - name: Install FFmpeg dev headers (gyan.dev)
         shell: pwsh
         run: |
-          curl.exe -L -o ffmpeg-dev.7z https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-dev.7z
+          curl.exe -L -o ffmpeg-dev.7z https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z
           7z x ffmpeg-dev.7z -offmpeg_dev
           $dir = Get-ChildItem -Path ffmpeg_dev -Directory | Select-Object -First 1
           "FFMPEG_DIR=$($dir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
