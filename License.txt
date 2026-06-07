@@ -26,15 +26,6 @@ GPL terms depending on the build configuration (see https://ffmpeg.org/legal).
 The bridge does not bundle, link against, or distribute FFmpeg/libav runtime
 binaries.
 
-When the bridge is compiled against LGPL-licensed FFmpeg headers (the default
-for builds produced by the included scripts against standard FFmpeg dev
-packages), the resulting binary is LGPL-2.1-or-later as above.
-
-If you compile the bridge against GPL-licensed FFmpeg headers (for example a
-"full" FFmpeg build that includes GPL-only codecs such as x264), you are
-responsible for ensuring compliance with the GPL for the resulting binary.
-Tangenten does not distribute GPL-licensed bridge binaries.
-
 The fuse script (Loader_FFmpeg.fuse) and Lua FFI loader (LibAV_FFI.lua) do not
 link against or include FFmpeg in any form; they are independent Lua software
 licensed under LGPL-2.1-or-later.
