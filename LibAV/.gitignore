@@ -1,4 +1,9 @@
-# FFmpeg/libav runtime libraries (user-supplied) — NOT our bridge binaries
+# Compiled bridge binaries (rebuilt from source)
+**/libav_bridge.so*
+**/libav_bridge.dylib
+**/libav_bridge.dll
+
+# FFmpeg/libav runtime libraries (user-supplied)
 **/libavutil*.so*
 **/libavcodec*.so*
 **/libavformat*.so*
