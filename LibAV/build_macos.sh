@@ -38,7 +38,7 @@ build_arch() {
 
 	cc -O2 -fPIC -dynamiclib -arch "$arch" -Wall -Wextra \
 		$cflags \
-		"$script_dir/tangenten_libav_bridge.c" \
+		"$script_dir/libav_bridge.c" \
 		-o "$out_path"
 
 	printf 'built %s\n' "$out_path"

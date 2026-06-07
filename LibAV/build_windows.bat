@@ -48,7 +48,7 @@ set "out_path=%out_dir%\libav_bridge.dll"
 
 cl /nologo /O2 /MD /W3 /TC /std:c11 ^
 	/I"%FFMPEG_DIR%\include" ^
-	/LD "%script_dir%tangenten_libav_bridge.c" ^
+	/LD "%script_dir%libav_bridge.c" ^
 	/Fo:"%out_dir%\libav_bridge.obj" ^
 	/Fe:"%out_path%"
 if errorlevel 1 exit /b 1

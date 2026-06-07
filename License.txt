@@ -20,7 +20,7 @@ USA.
 FFmpeg/libav notice
 -------------------
 
-The bridge (tangenten_libav_bridge.c) includes FFmpeg/libav header files at
+The bridge (libav_bridge.c) includes FFmpeg/libav header files at
 compile time via the public libav API.  FFmpeg/libav is licensed under LGPL or
 GPL terms depending on the build configuration (see https://ffmpeg.org/legal).
 The bridge does not bundle, link against, or distribute FFmpeg/libav runtime

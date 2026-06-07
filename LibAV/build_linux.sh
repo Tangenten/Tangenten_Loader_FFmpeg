@@ -16,7 +16,7 @@ mkdir -p "$out_dir"
 
 cc -O2 -fPIC -shared -Wall -Wextra \
   $(pkg-config --cflags libavformat libavcodec libavutil libswscale 2>/dev/null || true) \
-  "$script_dir/tangenten_libav_bridge.c" \
+  "$script_dir/libav_bridge.c" \
   -o "$out_path" \
   -ldl -lpthread
 
