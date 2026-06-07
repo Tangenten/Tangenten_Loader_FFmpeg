@@ -1,8 +1,8 @@
 Composition {
-	CurrentTime = 79,
+	CurrentTime = 108.5,
 	RenderRange = { 0, 120 },
 	GlobalRange = { 0, 120 },
-	CurrentID = 66,
+	CurrentID = 73,
 	HiQ = true,
 	PlaybackUpdateMode = 0,
 	StereoMode = false,
@@ -20,7 +20,7 @@ Composition {
 		Blur1 = Blur {
 			Inputs = {
 				Filter = Input { Value = FuID { "Fast Gaussian" }, },
-				XBlurSize = Input { Value = 31.5, },
+				XBlurSize = Input { Value = 16.5, },
 				Input = Input {
 					SourceOp = "LoaderFFmpeg1",
 					Source = "Output",
@@ -34,7 +34,7 @@ Composition {
 				InputPath = Input { Value = "Fuses:/Tangenten/.assets/Stock Media/13945500_2560_1440_30fps.mp4", },
 				ManualFrame = Input { Value = 520, }
 			},
-			ViewInfo = OperatorInfo { Pos = { -29.3333, 83.7273 } },
+			ViewInfo = OperatorInfo { Pos = { -29.3333, 83.1212 } },
 		}
 	},
 	Frames = {
@@ -48,14 +48,14 @@ Composition {
 			Width = 1268,
 			Height = 1307,
 			ZoneInfo = {
-				AuxRight = { Expanded = true },
+				["!Right"] = {
+				},
 				["!Left"] = {
 				},
 				AuxLeft = { Expanded = true },
 				Right = { Expanded = true, },
 				Left = { Expanded = false, },
-				["!Right"] = {
-				}
+				AuxRight = { Expanded = true }
 			},
 			ViewInfo = {
 				Viewer1 = { Show = true, RatioY = 0.01, RatioX = 1.74170616113744, },
@@ -63,7 +63,7 @@ Composition {
 				},
 				MainSplit = {
 					RatioX = 100,
-					RatioY = 1.00157853196527,
+					RatioY = 1.00077942322681,
 				},
 				CenterSplit = {
 					RatioX = 1,
@@ -74,20 +74,20 @@ Composition {
 				Time = { Show = true, RatioX = 100, },
 				InnerColumns = {
 					RatioX = 100,
-					RatioY = 1.99842146803473,
+					RatioY = 1.99922057677319,
 				},
 				Keyframes = { Show = false, },
 				LayoutStrip = { Show = true, RatioX = 100, },
 				Inspector = { Show = true, RatioY = 1, RatioX = 100, },
 				InnerRight = {
 				},
-				MediaPool = { Show = false, },
+				Clips = { Show = false, },
 				OuterColumns = {
 					RatioX = 100,
 					RatioY = 1,
 				},
 				Effects = { Show = false, },
-				ActionStrip = { Show = false, Adjust = true, MRU = 0, RatioX = 100, },
+				ActionStrip = { Show = false, RatioX = 100, MRU = 0, Adjust = true, },
 				Metadata = { Show = false, },
 				OuterLeft = {
 				},
@@ -97,10 +97,10 @@ Composition {
 				},
 				Nodes = { Show = true, RatioY = 100, RatioX = 1, },
 				OuterRight = {
-					PixelX = 420,
 					RatioY = 100,
+					PixelX = 420,
 				},
-				Clips = { Show = false, },
+				MediaPool = { Show = false, },
 				Spline = { Show = false, }
 			},
 			Views = ordered() {
@@ -125,7 +125,7 @@ Composition {
 						Direction = "Horizontal",
 						PipeStyle = "Direct",
 						RootScale = 1,
-						RootOffset = { 259.333, 39.303 }
+						RootOffset = { 240.666, 102.333 }
 					}
 				},
 				Keyframes = MultiView {
@@ -165,7 +165,7 @@ Composition {
 						LeftPos = 264,
 						ScaleX = 0.2,
 						ScaleY = 0.00338983050847458,
-						OffsetX = -3.4,
+						OffsetX = 43.2,
 						OffsetY = 0,
 						AutoScaling = "scroll",
 						AutoSnapTo = "frame",
