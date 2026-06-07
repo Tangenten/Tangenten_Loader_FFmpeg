@@ -1,8 +1,16 @@
 # FFmpeg/libav runtime libraries (user-supplied) — NOT our bridge binaries
-**/libav*.so*
+**/libavutil*.so*
+**/libavcodec*.so*
+**/libavformat*.so*
+**/libavdevice*.so*
+**/libavfilter*.so*
 **/libswscale*.so*
 **/libswresample*.so*
-**/libav*.dylib
+**/libavutil*.dylib
+**/libavcodec*.dylib
+**/libavformat*.dylib
+**/libavdevice*.dylib
+**/libavfilter*.dylib
 **/libswscale*.dylib
 **/libswresample*.dylib
 **/avcodec-*.dll
