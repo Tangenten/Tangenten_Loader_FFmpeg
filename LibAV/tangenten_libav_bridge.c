@@ -252,27 +252,15 @@ static void formatAvError(int err, char* dst, size_t dstSize)
 
 static void joinPath(char* dst, size_t dstSize, const char* dir, const char* fileName)
 {
+	if (dstSize == 0) return;
+	size_t dirLen = strlen(dir);
+	int needSep = dirLen > 0 && dir[dirLen - 1] != '/' && dir[dirLen - 1] != '\\';
 #ifdef _WIN32
-	const char sep = '\\';
+	int ret = snprintf(dst, dstSize, "%s%s%s", dir, needSep ? "\\" : "", fileName);
 #else
-	const char sep = '/';
+	int ret = snprintf(dst, dstSize, "%s%s%s", dir, needSep ? "/" : "", fileName);
 #endif
-	size_t len = strlen(dir);
-	if (dstSize == 0) {
-		return;
-	}
-
-	dst[0] = '\0';
-	strncat(dst, dir, dstSize - 1);
-	if (len == 0 || (dir[len - 1] != '/' && dir[len - 1] != '\\')) {
-		size_t used = strlen(dst);
-		if (used + 1 < dstSize) {
-			dst[used] = sep;
-			dst[used + 1] = '\0';
-		}
-	}
-	strncat(dst, fileName, dstSize - strlen(dst) - 1);
-	dst[dstSize - 1] = '\0';
+	if (ret < 0 || (size_t)ret >= dstSize) dst[dstSize - 1] = '\0';
 }
 
 static void* loadSharedObject(const char* path)
@@ -353,7 +341,8 @@ static int matchLibrary(const char* name, const char* lib) {
 }
 #endif
 
-struct LibEntry { char name[128]; int version; };
+/* d_name can be up to NAME_MAX (typically 255 + NUL). */
+struct LibEntry { char name[256]; int version; };
 
 static int entrySortDesc(const void* a, const void* b) {
 	return ((const struct LibEntry*)b)->version - ((const struct LibEntry*)a)->version;
