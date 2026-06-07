@@ -16,6 +16,13 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Output paths — override via TLAV_OUT_DIR_TEMPLATE, TLAV_*_NAME env vars.
+# TLAV_OUT_DIR_TEMPLATE uses %a as the arch placeholder (e.g. mac_%a -> mac_x86_64).
+: "${TLAV_OUT_DIR_TEMPLATE:=$script_dir/mac_%a}"
+: "${TLAV_ABI3_NAME:=libtangenten_libav_bridge_abi3.dylib}"
+: "${TLAV_ABI2_NAME:=libtangenten_libav_bridge_abi2.dylib}"
+: "${TLAV_LEGACY_NAME:=libtangenten_libav_bridge.dylib}"
+
 if ! command -v pkg-config >/dev/null 2>&1; then
 	echo "error: pkg-config not found (try: brew install pkg-config ffmpeg)" >&2
 	exit 1
@@ -25,10 +32,10 @@ cflags="$(pkg-config --cflags libavformat libavcodec libavutil libswscale 2>/dev
 
 build_arch() {
 	local arch="$1"
-	local out_dir="$script_dir/mac_$arch"
-	local abi3_out="$out_dir/libtangenten_libav_bridge_abi3.dylib"
-	local abi2_out="$out_dir/libtangenten_libav_bridge_abi2.dylib"
-	local legacy_out="$out_dir/libtangenten_libav_bridge.dylib"
+	local out_dir="$(echo "$TLAV_OUT_DIR_TEMPLATE" | sed "s/%a/$arch/g")"
+	local abi3_out="$out_dir/$TLAV_ABI3_NAME"
+	local abi2_out="$out_dir/$TLAV_ABI2_NAME"
+	local legacy_out="$out_dir/$TLAV_LEGACY_NAME"
 	mkdir -p "$out_dir"
 
 	cc -O2 -fPIC -dynamiclib -arch "$arch" -Wall -Wextra \

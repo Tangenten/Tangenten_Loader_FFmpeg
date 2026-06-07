@@ -49,5 +49,3 @@ Loop Behaviour:
 
 Notes
 -----
-
-v1 decodes video only. hardware decoding are not exposed.

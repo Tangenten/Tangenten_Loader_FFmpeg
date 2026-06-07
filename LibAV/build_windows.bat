@@ -11,10 +11,21 @@ rem
 rem   set FFMPEG_DIR=C:\ffmpeg
 rem   build_windows.bat
 rem
-rem Output goes to windows_x86_64\.
+rem Output paths — override via TLAV_OUT_DIR, TLAV_*_NAME env vars.
+rem   set TLAV_OUT_DIR=some\other\path
+rem   build_windows.bat
+rem
+rem Default output: windows_x86_64\.
 
 set "script_dir=%~dp0"
-set "out_dir=%script_dir%windows_x86_64"
+if defined TLAV_OUT_DIR (
+	set "out_dir=%TLAV_OUT_DIR%"
+) else (
+	set "out_dir=%script_dir%windows_x86_64"
+)
+if not defined TLAV_ABI3_NAME set "TLAV_ABI3_NAME=tangenten_libav_bridge_abi3.dll"
+if not defined TLAV_ABI2_NAME set "TLAV_ABI2_NAME=tangenten_libav_bridge_abi2.dll"
+if not defined TLAV_LEGACY_NAME set "TLAV_LEGACY_NAME=tangenten_libav_bridge.dll"
 
 if not defined FFMPEG_DIR (
 	echo error: set FFMPEG_DIR to your FFmpeg dev folder ^(must contain include\^)
@@ -33,9 +44,9 @@ if errorlevel 1 (
 
 if not exist "%out_dir%" mkdir "%out_dir%"
 
-set "abi3=%out_dir%\tangenten_libav_bridge_abi3.dll"
-set "abi2=%out_dir%\tangenten_libav_bridge_abi2.dll"
-set "legacy=%out_dir%\tangenten_libav_bridge.dll"
+set "abi3=%out_dir%\%TLAV_ABI3_NAME%"
+set "abi2=%out_dir%\%TLAV_ABI2_NAME%"
+set "legacy=%out_dir%\%TLAV_LEGACY_NAME%"
 
 cl /nologo /O2 /MD /W3 /TC /std:c11 ^
 	/I"%FFMPEG_DIR%\include" ^

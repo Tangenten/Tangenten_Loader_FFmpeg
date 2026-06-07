@@ -1,7 +1,1 @@
-Loader (FFmpeg) Todo
-====================
 
-- Build and verify bridge binaries for Windows and macOS.
-- Add optional hardware decode only after software decode is stable.
-- Improve VFR timeline mapping if real-world files need it.
-- Consider metadata Number outputs if downstream wiring becomes necessary.

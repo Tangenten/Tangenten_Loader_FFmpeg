@@ -24,6 +24,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
+#include <dirent.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #endif
@@ -292,17 +293,133 @@ static void* loadSymbol(void* handle, const char* symbolName)
 #endif
 }
 
-static void* loadFirstLibrary(const char* label, const char* const* names)
+/* ---- Dynamic library discovery ---- */
+
+#ifdef _WIN32
+/* Extract version from "avcodec-62.dll" -> 62, or -1. */
+static int dllVersion(const char* name)
 {
-	char path[PATH_MAX];
-	for (int i = 0; names[i] != NULL; i++) {
-		joinPath(path, sizeof(path), gLibraryDir, names[i]);
-		void* handle = loadSharedObject(path);
-		if (handle) {
-			return handle;
+	const char* dot = strrchr(name, '.');
+	if (!dot) return -1;
+	const char* dash = NULL;
+	for (const char* p = dot - 1; p >= name; p--) {
+		if (*p == '-') { dash = p; break; }
+	}
+	if (!dash) return -1;
+	return atoi(dash + 1);
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "%s-", lib);
+	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dll");
+}
+#elif defined(__APPLE__)
+/* Extract version from "libavutil.60.dylib" -> 60, or -1. */
+static int dylibVersion(const char* name)
+{
+	const char* dot = strrchr(name, '.');
+	if (!dot) return -1;
+	const char* prevDot = NULL;
+	for (const char* p = dot - 1; p >= name; p--) {
+		if (*p == '.') { prevDot = p; break; }
+	}
+	if (!prevDot) return -1;
+	char buf[32];
+	size_t len = (size_t)(dot - prevDot - 1);
+	if (len >= sizeof(buf)) return -1;
+	memcpy(buf, prevDot + 1, len);
+	buf[len] = '\0';
+	int v = atoi(buf);
+	return v > 0 ? v : -1;
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "lib%s.", lib);
+	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dylib");
+}
+#else
+/* Extract version from "libavutil.so.60" -> 60, or -1. */
+static int soVersion(const char* name)
+{
+	const char* dot = strrchr(name, '.');
+	if (!dot) return -1;
+	int v = atoi(dot + 1);
+	return v > 0 ? v : -1;
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "lib%s.", lib);
+	return strncmp(name, pat, strlen(pat)) == 0;
+}
+#endif
+
+struct LibEntry { char name[128]; int version; };
+
+static int entrySortDesc(const void* a, const void* b) {
+	return ((const struct LibEntry*)b)->version - ((const struct LibEntry*)a)->version;
+}
+
+/* Scan gLibraryDir for files matching library <lib>, return sorted entries. */
+static int scanLibraries(const char* lib, struct LibEntry* entries, int max)
+{
+	int count = 0;
+#ifdef _WIN32
+	char pattern[PATH_MAX];
+	snprintf(pattern, sizeof(pattern), "%s\\%s-*.dll", gLibraryDir, lib);
+	WIN32_FIND_DATAA ffd;
+	HANDLE hFind = FindFirstFileA(pattern, &ffd);
+	if (hFind == INVALID_HANDLE_VALUE) return 0;
+	do {
+		if (count >= max) break;
+		if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+		snprintf(entries[count].name, sizeof(entries[count].name), "%s", ffd.cFileName);
+		entries[count].version = dllVersion(ffd.cFileName);
+		count++;
+	} while (FindNextFileA(hFind, &ffd) != 0);
+	FindClose(hFind);
+#else
+	DIR* d = opendir(gLibraryDir);
+	if (!d) return 0;
+	struct dirent* entry;
+	while ((entry = readdir(d)) != NULL && count < max) {
+		if (!matchLibrary(entry->d_name, lib)) continue;
+		snprintf(entries[count].name, sizeof(entries[count].name), "%s", entry->d_name);
+		entries[count].version =
+#ifdef __APPLE__
+			dylibVersion(entry->d_name);
+#else
+			soVersion(entry->d_name);
+#endif
+		count++;
+	}
+	closedir(d);
+#endif
+	if (count > 1) qsort(entries, (size_t)count, sizeof(struct LibEntry), entrySortDesc);
+	return count;
+}
+
+/* Try to load a library, preferring discovered files over the static fallback. */
+static void* loadLibrary(const char* label, const char* libRoot, const char* const* fallback)
+{
+	struct LibEntry entries[32];
+	int n = scanLibraries(libRoot, entries, 32);
+	if (n > 0) {
+		char path[PATH_MAX];
+		for (int i = 0; i < n; i++) {
+			joinPath(path, sizeof(path), gLibraryDir, entries[i].name);
+			void* handle = loadSharedObject(path);
+			if (handle) return handle;
 		}
 	}
-
+	/* Static fallback. */
+	if (fallback) {
+		char path[PATH_MAX];
+		for (int i = 0; fallback[i] != NULL; i++) {
+			joinPath(path, sizeof(path), gLibraryDir, fallback[i]);
+			void* handle = loadSharedObject(path);
+			if (handle) return handle;
+		}
+	}
 	setError("Missing %s in %s", label, gLibraryDir);
 	return NULL;
 }
@@ -365,15 +482,15 @@ static int loadApi(void)
 #endif
 
 	memset(&gApi, 0, sizeof(gApi));
-	gApi.avutil = loadFirstLibrary("libavutil", avutilNames);
+	gApi.avutil = loadLibrary("libavutil", "avutil", avutilNames);
 	if (!gApi.avutil) return 0;
-	gApi.swresample = loadFirstLibrary("libswresample", swresampleNames);
+	gApi.swresample = loadLibrary("libswresample", "swresample", swresampleNames);
 	if (!gApi.swresample) return 0;
-	gApi.avcodec = loadFirstLibrary("libavcodec", avcodecNames);
+	gApi.avcodec = loadLibrary("libavcodec", "avcodec", avcodecNames);
 	if (!gApi.avcodec) return 0;
-	gApi.avformat = loadFirstLibrary("libavformat", avformatNames);
+	gApi.avformat = loadLibrary("libavformat", "avformat", avformatNames);
 	if (!gApi.avformat) return 0;
-	gApi.swscale = loadFirstLibrary("libswscale", swscaleNames);
+	gApi.swscale = loadLibrary("libswscale", "swscale", swscaleNames);
 	if (!gApi.swscale) return 0;
 
 	LOAD_SYMBOL(gApi.avutil, av_version_info);
