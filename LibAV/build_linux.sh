@@ -1,4 +1,8 @@
-#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (c) 2026 Tangenten.
+#
+# Build the Tangenten LibAV bridge for Linux (x86_64).
+
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

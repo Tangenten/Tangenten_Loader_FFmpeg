@@ -1,5 +1,8 @@
 @echo off
 setlocal enabledelayedexpansion
+rem SPDX-License-Identifier: LGPL-2.1-or-later
+rem Copyright (c) 2026 Tangenten.
+rem
 rem Build the Tangenten LibAV bridge for Windows (x64) with MSVC.
 rem
 rem Run this from a "x64 Native Tools Command Prompt for VS" so cl.exe is on

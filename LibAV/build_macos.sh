@@ -1,4 +1,6 @@
-#!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# Copyright (c) 2026 Tangenten.
+#
 # Build the Tangenten LibAV bridge for macOS.
 #
 # Produces fat-free per-arch dylibs in the platform folders the fuse looks in:
@@ -12,6 +14,7 @@
 #   ./build_macos.sh            # build both x86_64 and arm64
 #   ./build_macos.sh x86_64     # build a single arch
 #   ./build_macos.sh arm64
+
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

@@ -1,6 +1,9 @@
 Tangenten Loader LibAV bridge
 =============================
 
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (c) 2026 Tangenten.
+
 This folder contains the native bridge used by Loader (FFmpeg). The fuse
 loads the bridge and FFmpeg/libav runtime libraries only from:
 

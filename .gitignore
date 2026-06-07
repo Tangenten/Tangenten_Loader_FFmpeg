@@ -2,5 +2,5 @@
 .DS_Store
 Thumbs.db
 
-# Fusion auto-saves
+# Fusion auto-saves (not content)
 *.autocomp
