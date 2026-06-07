@@ -1,10 +1,10 @@
 # Build the Tangenten LibAV bridge (tangenten_libav_bridge) across platforms.
 #
 # Produces per-platform artifacts:
-#   Linux   -> linux_x86_64/*.so        (3 ABI variants)
+#   Linux   -> linux_x86_64/*.so
 #   macOS   -> mac_x86_64/*.dylib       (Intel)
 #            mac_arm64/*.dylib          (Apple Silicon)
-#   Windows -> windows_x86_64/*.dll     (3 ABI variants)
+#   Windows -> windows_x86_64/*.dll
 
 name: Build LibAV Bridge
 

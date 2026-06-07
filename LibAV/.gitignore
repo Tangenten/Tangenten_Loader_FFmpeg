@@ -1,19 +1,4 @@
-# Compiled bridge binaries (rebuilt from source)
-**/libtangenten_libav_bridge*.so*
-**/libtangenten_libav_bridge*.dylib
-**/tangenten_libav_bridge*.dll
-
-# FFmpeg runtime libraries (user-supplied)
-**/libav*.so*
-**/libswscale*.so*
-**/libswresample*.so*
-**/libav*.dylib
-**/libswscale*.dylib
-**/libswresample*.dylib
-**/avcodec-*.dll
-**/avdevice-*.dll
-**/avfilter-*.dll
-**/avformat-*.dll
-**/avutil-*.dll
-**/swscale-*.dll
-**/swresample-*.dll
+# Compiled bridge binaries and FFmpeg runtime libraries (rebuilt/user-supplied)
+**/*.so*
+**/*.dll
+**/*.dylib

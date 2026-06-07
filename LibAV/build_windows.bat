@@ -11,7 +11,7 @@ rem
 rem   set FFMPEG_DIR=C:\ffmpeg
 rem   build_windows.bat
 rem
-rem Output paths — override via TLAV_OUT_DIR, TLAV_*_NAME env vars.
+rem Output path — override via TLAV_OUT_DIR env var.
 rem   set TLAV_OUT_DIR=some\other\path
 rem   build_windows.bat
 rem
@@ -23,9 +23,6 @@ if defined TLAV_OUT_DIR (
 ) else (
 	set "out_dir=%script_dir%windows_x86_64"
 )
-if not defined TLAV_ABI3_NAME set "TLAV_ABI3_NAME=tangenten_libav_bridge_abi3.dll"
-if not defined TLAV_ABI2_NAME set "TLAV_ABI2_NAME=tangenten_libav_bridge_abi2.dll"
-if not defined TLAV_LEGACY_NAME set "TLAV_LEGACY_NAME=tangenten_libav_bridge.dll"
 
 if not defined FFMPEG_DIR (
 	echo error: set FFMPEG_DIR to your FFmpeg dev folder ^(must contain include\^)
@@ -44,25 +41,18 @@ if errorlevel 1 (
 
 if not exist "%out_dir%" mkdir "%out_dir%"
 
-set "abi3=%out_dir%\%TLAV_ABI3_NAME%"
-set "abi2=%out_dir%\%TLAV_ABI2_NAME%"
-set "legacy=%out_dir%\%TLAV_LEGACY_NAME%"
+set "out_path=%out_dir%\tangenten_libav_bridge.dll"
 
 cl /nologo /O2 /MD /W3 /TC /std:c11 ^
 	/I"%FFMPEG_DIR%\include" ^
 	/LD "%script_dir%tangenten_libav_bridge.c" ^
 	/Fo:"%out_dir%\tangenten_libav_bridge.obj" ^
-	/Fe:"%abi3%"
+	/Fe:"%out_path%"
 if errorlevel 1 exit /b 1
 
-copy /y "%abi3%" "%abi2%" >nul
-copy /y "%abi3%" "%legacy%" >nul
-
-rem Drop MSVC intermediates, keep only the DLLs.
+rem Drop MSVC intermediates, keep only the DLL.
 del /q "%out_dir%\tangenten_libav_bridge.obj" 2>nul
-del /q "%out_dir%\tangenten_libav_bridge_abi3.lib" 2>nul
-del /q "%out_dir%\tangenten_libav_bridge_abi3.exp" 2>nul
+del /q "%out_dir%\tangenten_libav_bridge.exp" 2>nul
+del /q "%out_dir%\tangenten_libav_bridge.lib" 2>nul
 
-echo built %abi3%
-echo updated %abi2%
-echo updated %legacy%
+echo built %out_path%

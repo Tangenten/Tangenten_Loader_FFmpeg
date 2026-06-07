@@ -84,14 +84,14 @@ local function platformDir()
 	return osName .. "_" .. archName
 end
 
-local function bridgeFileNames()
+local function bridgeFileName()
 	if ffi.os == "Windows" then
-		return { "tangenten_libav_bridge_abi3.dll", "tangenten_libav_bridge_abi2.dll", "tangenten_libav_bridge.dll" }
+		return "tangenten_libav_bridge.dll"
 	elseif ffi.os == "OSX" then
-		return { "libtangenten_libav_bridge_abi3.dylib", "libtangenten_libav_bridge_abi2.dylib", "libtangenten_libav_bridge.dylib" }
+		return "libtangenten_libav_bridge.dylib"
 	end
 
-	return { "libtangenten_libav_bridge_abi3.so", "libtangenten_libav_bridge_abi2.so", "libtangenten_libav_bridge.so" }
+	return "libtangenten_libav_bridge.so"
 end
 
 local function fileExists(path)
@@ -107,24 +107,19 @@ end
 local function loadLibrary(fuseDir)
 	local sep = getPathSeparator()
 	local libDir = fuseDir .. sep .. "LibAV" .. sep .. platformDir()
-	local missingPaths = {}
-
-	for _, bridgeName in ipairs(bridgeFileNames()) do
-		local bridgePath = libDir .. sep .. bridgeName
-		if fileExists(bridgePath) then
-			local ok, lib = pcall(ffi.load, bridgePath)
-			if not ok then
-				return nil, "Failed to load LibAV bridge from '" .. bridgePath .. "': " .. tostring(lib)
-			end
-
-			lib.tlav_set_library_dir(libDir)
-			return lib, nil, libDir, bridgePath, bridgeName
-		end
-
-		missingPaths[#missingPaths + 1] = bridgePath
+	local bridgeName = bridgeFileName()
+	local bridgePath = libDir .. sep .. bridgeName
+	if not fileExists(bridgePath) then
+		return nil, "LibAV bridge not found at " .. bridgePath
 	end
 
-	return nil, "LibAV bridge not found: " .. table.concat(missingPaths, " or ")
+	local ok, lib = pcall(ffi.load, bridgePath)
+	if not ok then
+		return nil, "Failed to load LibAV bridge from '" .. bridgePath .. "': " .. tostring(lib)
+	end
+
+	lib.tlav_set_library_dir(libDir)
+	return lib, nil, libDir, bridgePath, bridgeName
 end
 
 local function ffiString(value)
@@ -157,7 +152,6 @@ local function build(fuseDir)
 	module.libDir = libDir
 	module.bridgePath = bridgePath
 	module.bridgeName = bridgeName
-	module.bridgeAbi = bridgeName and bridgeName:find("_abi", 1, true) and "abi2" or "legacy"
 	local lastDebugFn
 	local hasLastDebug = pcall(function()
 		lastDebugFn = C.tlav_last_debug

@@ -307,13 +307,8 @@ end
 
 local function loadLibAV()
 	if LOADER_LIBAV then
-		if LOADER_LIBAV.bridgeAbi == "abi2" then
-			logInfo("[libav] Reusing loaded bridge", LOADER_LIBAV.version(), "path", LOADER_LIBAV.bridgePath or "<unknown>")
-			return LOADER_LIBAV
-		end
-
-		logInfo("[libav] Dropping cached bridge without ABI2 tag", "path", LOADER_LIBAV.bridgePath or "<unknown>")
-		LOADER_LIBAV = nil
+		logInfo("[libav] Reusing loaded bridge", LOADER_LIBAV.version(), "path", LOADER_LIBAV.bridgePath or "<unknown>")
+		return LOADER_LIBAV
 	end
 	if LOADER_LIBAV_ERROR then
 		logInfo("[libav] Returning cached bridge error", LOADER_LIBAV_ERROR)
@@ -339,19 +334,14 @@ local function loadLibAV()
 	end
 
 	LOADER_LIBAV = libAV
-	logInfo("[libav] Loaded", libAV.version(), "dir", libAV.libDir or "<unknown>", "bridge", libAV.bridgePath or "<unknown>", "abi", libAV.bridgeAbi or "<unknown>")
+	logInfo("[libav] Loaded", libAV.version(), "dir", libAV.libDir or "<unknown>", "bridge", libAV.bridgePath or "<unknown>")
 	return LOADER_LIBAV
 end
 
 local function ensureDecoder(path)
 	if LOADER_DECODER and LOADER_DECODER_PATH == path then
-		if LOADER_LIBAV and LOADER_LIBAV.bridgeAbi == "abi2" then
-			logInfo("[decode] Reusing decoder", path)
-			return LOADER_DECODER
-		end
-
-		logInfo("[decode] Dropping cached decoder without ABI2 bridge", path)
-		closeDecoder()
+		logInfo("[decode] Reusing decoder", path)
+		return LOADER_DECODER
 	end
 
 	closeDecoder()
