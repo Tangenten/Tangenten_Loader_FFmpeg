@@ -1,17 +1,40 @@
-Copyright (c) 2026 Tangenten. All rights reserved.
+Copyright (c) 2026 Tangenten.
 
-Licensed per individual user. Redistribution, sublicensing, or resale is not
-permitted unless explicitly granted by Tangenten in writing.
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
 
-Third-party software
---------------------
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
 
-This fuse can use FFmpeg/libav runtime libraries supplied by the user.
-FFmpeg/libav is licensed under LGPL/GPL terms depending on the exact build,
-enabled codecs, and linked libraries. The original source code is available at:
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+USA.
 
-  https://ffmpeg.org
+---
 
-This repository does not include FFmpeg/libav runtime binaries. Users are
-responsible for complying with all applicable third-party licenses and patent
-requirements for the binaries they provide.
+FFmpeg/libav notice
+-------------------
+
+The bridge (tangenten_libav_bridge.c) includes FFmpeg/libav header files at
+compile time via the public libav API.  FFmpeg/libav is licensed under LGPL or
+GPL terms depending on the build configuration (see https://ffmpeg.org/legal).
+The bridge does not bundle, link against, or distribute FFmpeg/libav runtime
+binaries.
+
+When the bridge is compiled against LGPL-licensed FFmpeg headers (the default
+for builds produced by the included scripts against standard FFmpeg dev
+packages), the resulting binary is LGPL-2.1-or-later as above.
+
+If you compile the bridge against GPL-licensed FFmpeg headers (for example a
+"full" FFmpeg build that includes GPL-only codecs such as x264), you are
+responsible for ensuring compliance with the GPL for the resulting binary.
+Tangenten does not distribute GPL-licensed bridge binaries.
+
+The fuse script (Loader_FFmpeg.fuse) and Lua FFI loader (LibAV_FFI.lua) do not
+link against or include FFmpeg in any form; they are independent Lua software
+licensed under LGPL-2.1-or-later.

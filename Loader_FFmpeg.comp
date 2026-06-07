@@ -1,8 +1,8 @@
 Composition {
-	CurrentTime = 108.5,
+	CurrentTime = 87,
 	RenderRange = { 0, 120 },
 	GlobalRange = { 0, 120 },
-	CurrentID = 75,
+	CurrentID = 77,
 	HiQ = true,
 	PlaybackUpdateMode = 0,
 	StereoMode = false,
@@ -17,14 +17,6 @@ Composition {
 	OutputClips = {
 	},
 	Tools = {
-		LoaderFFmpeg1 = Fuse.Loader_FFmpeg {
-			CtrlWZoom = false,
-			Inputs = {
-				InputPath = Input { Value = "Fuses:/Tangenten/.assets/Stock Media/13945500_2560_1440_30fps.mp4", },
-				ManualFrame = Input { Value = 520, }
-			},
-			ViewInfo = OperatorInfo { Pos = { -29.3333, 83.1212 } },
-		},
 		Blur1 = Blur {
 			Inputs = {
 				Filter = Input { Value = FuID { "Fast Gaussian" }, },
@@ -35,6 +27,14 @@ Composition {
 				}
 			},
 			ViewInfo = OperatorInfo { Pos = { 81.3334, 84.3333 } },
+		},
+		LoaderFFmpeg1 = Fuse.Loader_FFmpeg {
+			CtrlWZoom = false,
+			Inputs = {
+				InputPath = Input { Value = "Fuses:/Tangenten/.assets/Stock Media/6581258-hd_1920_1080_30fps.mp4", },
+				ManualFrame = Input { Value = 520, }
+			},
+			ViewInfo = OperatorInfo { Pos = { -29.3333, 83.1212 } },
 		}
 	},
 	Frames = {
@@ -48,14 +48,14 @@ Composition {
 			Width = 1268,
 			Height = 1307,
 			ZoneInfo = {
-				AuxRight = { Expanded = true },
+				["!Right"] = {
+				},
 				["!Left"] = {
 				},
 				AuxLeft = { Expanded = true },
 				Right = { Expanded = true, },
 				Left = { Expanded = false, },
-				["!Right"] = {
-				}
+				AuxRight = { Expanded = true }
 			},
 			ViewInfo = {
 				Viewer1 = { Show = true, RatioY = 0.01, RatioX = 1.74170616113744, },
@@ -81,7 +81,7 @@ Composition {
 				Inspector = { Show = true, RatioY = 1, RatioX = 100, },
 				InnerRight = {
 				},
-				MediaPool = { Show = false, },
+				ActionStrip = { Show = false, RatioX = 100, MRU = 0, Adjust = true, },
 				OuterColumns = {
 					RatioX = 100,
 					RatioY = 1,
@@ -97,10 +97,10 @@ Composition {
 				},
 				Nodes = { Show = true, RatioY = 100, RatioX = 1, },
 				OuterRight = {
-					PixelX = 420,
 					RatioY = 100,
+					PixelX = 420,
 				},
-				ActionStrip = { Show = false, Adjust = true, MRU = 0, RatioX = 100, },
+				MediaPool = { Show = false, },
 				Spline = { Show = false, }
 			},
 			Views = ordered() {
@@ -151,7 +151,7 @@ Composition {
 							AutoSnapTo = "frame",
 							AutoSnapToGuidelines = false,
 							GuidelinesGrabEnabled = true,
-							GuidelinesSnapTo = "none"
+							GuidelinesSnapTo = "frame"
 						},
 						Spreadsheet = { LeftPos = 232, Visible = false }
 					}
@@ -299,7 +299,7 @@ Composition {
 					Viewer = {
 						Layer = ":Default",
 						ScaleMode = 1,
-						Smooth = false
+						Smooth = false,
 					},
 				},
 				View1 = {

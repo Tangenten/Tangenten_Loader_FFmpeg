@@ -1,4 +1,7 @@
-/*
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (c) 2026 Tangenten.
+ *
  * Tangenten LibAV bridge for Loader_FFmpeg.
  *
  * The bridge owns FFmpeg/libav decoder state and exposes a compact ABI for

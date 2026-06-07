@@ -1,11 +1,12 @@
 --[[
-License:
-Copyright (c) 2026 Tangenten. All rights reserved.
-Licensed per individual user. See License.txt for full terms.
+SPDX-License-Identifier: LGPL-2.1-or-later
 
-Third-party licenses:
-- FFmpeg/libav: LGPLv2.1+/GPLv2.0 depending on the user-provided build.
-You are responsible for complying with their respective licenses.
+Copyright (c) 2026 Tangenten.
+
+This library is free software; you can redistribute it and/or modify it
+under the terms of the GNU Lesser General Public License as published by
+the Free Software Foundation; either version 2.1 of the License, or (at
+your option) any later version.  See License.txt for the full text.
 
 Tool:    Loader_FFmpeg (Loader (FFmpeg))
 Purpose: Video playback through a fuse-local LibAV bridge.

@@ -1,3 +1,7 @@
+-- SPDX-License-Identifier: LGPL-2.1-or-later
+--
+-- Copyright (c) 2026 Tangenten.
+--
 -- Loader_FFmpeg LuaJIT FFI bindings for the Tangenten LibAV bridge.
 -- The bridge and FFmpeg/libav runtime libraries are loaded only from the
 -- fuse-local LibAV/<platform> folder.
