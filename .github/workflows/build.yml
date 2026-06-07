@@ -104,7 +104,7 @@ jobs:
 
   commit-binaries:
     name: Commit bridge binaries
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: [build-linux, build-macos-x86_64, build-macos-arm64, build-windows]
     runs-on: ubuntu-latest
     steps:
