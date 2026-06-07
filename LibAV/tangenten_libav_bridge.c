@@ -127,18 +127,6 @@ typedef struct TlavDecoder {
 	int rgba_size;
 	int width;
 	int height;
-	/* Small frame cache for efficient reverse playback. */
-#define FRAME_CACHE_SIZE 15
-	struct {
-		int64_t frameIndex;
-		uint8_t* data;
-		int width;
-		int height;
-		int stride;
-		int valid;
-	} cache[FRAME_CACHE_SIZE];
-	int cacheWriteSlot;
-
 	int last_scaled_rows;
 	int first_row_alpha_min;
 	int first_row_alpha_max;
@@ -616,14 +604,6 @@ static void closeDecoder(TlavDecoder* dec)
 		return;
 	}
 
-	/* Free frame cache. */
-	for (int i = 0; i < FRAME_CACHE_SIZE; i++) {
-		if (dec->cache[i].data) {
-			free(dec->cache[i].data);
-			dec->cache[i].data = NULL;
-		}
-	}
-
 	if (dec->sws && gApi.sws_freeContext) {
 		gApi.sws_freeContext(dec->sws);
 	}
@@ -1092,85 +1072,6 @@ TLAV_EXPORT void* tlav_open(const char* path, TlavInfo* info)
 	return dec;
 }
 
-/* ---- Frame cache (ring buffer) ---- */
-
-/* Look up a cached frame. Returns a pointer to its RGBA data or NULL. */
-static uint8_t* cacheLookup(TlavDecoder* dec, int64_t frameIndex, int* width, int* height, int* stride)
-{
-	for (int i = 0; i < FRAME_CACHE_SIZE; i++) {
-		if (dec->cache[i].valid && dec->cache[i].frameIndex == frameIndex) {
-			if (width) *width = dec->cache[i].width;
-			if (height) *height = dec->cache[i].height;
-			if (stride) *stride = dec->cache[i].stride;
-			return dec->cache[i].data;
-		}
-	}
-	return NULL;
-}
-
-/* Add a decoded RGBA frame to the cache. */
-static void cacheAdd(TlavDecoder* dec, int64_t frameIndex, const uint8_t* data, int width, int height, int stride)
-{
-	int slot = dec->cacheWriteSlot;
-	dec->cacheWriteSlot = (dec->cacheWriteSlot + 1) % FRAME_CACHE_SIZE;
-
-	if (dec->cache[slot].data) {
-		free(dec->cache[slot].data);
-		dec->cache[slot].data = NULL;
-	}
-
-	int rowBytes = width * 4;
-	int totalBytes = rowBytes * height;
-	uint8_t* copy = (uint8_t*)malloc((size_t)totalBytes);
-	if (!copy) return;
-	memcpy(copy, data, (size_t)totalBytes);
-
-	dec->cache[slot].frameIndex = frameIndex;
-	dec->cache[slot].data = copy;
-	dec->cache[slot].width = width;
-	dec->cache[slot].height = height;
-	dec->cache[slot].stride = stride;
-	dec->cache[slot].valid = 1;
-}
-
-/* Decode frames until we have cached up to <target> + lookahead,
- * then return the RGBA data for <target> via cacheLookup. */
-static uint8_t* decodeAndCacheRange(TlavDecoder* dec, int64_t target, int lookahead,
-	int* outWidth, int* outHeight, int* outStride)
-{
-	/* Seek to the start of the range. */
-	int64_t seekTo = target > (int64_t)lookahead ? target - (int64_t)lookahead : 0;
-	seekDecoder(dec, seekTo);
-
-	/* Decode forward, caching every frame. */
-	int64_t endTarget = target + (int64_t)lookahead;
-	if (dec->frame_count > 0 && endTarget >= dec->frame_count) {
-		endTarget = dec->frame_count - 1;
-	}
-
-	while (dec->current_frame < endTarget) {
-		if (!receiveNextFrame(dec)) break;
-
-		int64_t decodedIdx = 0;
-		int hasTs = estimateFrameIndex(dec, &decodedIdx);
-		if (!hasTs) decodedIdx = dec->current_frame + 1;
-
-		if (decodedIdx < seekTo) {
-			dec->current_frame = decodedIdx;
-			continue;
-		}
-
-		if (!convertFrame(dec)) break;
-
-		cacheAdd(dec, decodedIdx, dec->rgba, dec->width, dec->height, dec->width * 4);
-		dec->current_frame = decodedIdx;
-
-		if (decodedIdx >= endTarget) break;
-	}
-
-	return cacheLookup(dec, target, outWidth, outHeight, outStride);
-}
-
 TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFrame)
 {
 	lockMutex();
@@ -1193,19 +1094,12 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 		frameIndex = dec->frame_count - 1;
 	}
 
-	/* Check the frame cache before doing any I/O. */
-	int cw = 0, ch = 0, cs = 0;
-	uint8_t* cached = cacheLookup(dec, frameIndex, &cw, &ch, &cs);
-	if (cached) {
-		memcpy(dec->rgba, cached, (size_t)(ch * cs));
-		dec->width = cw;
-		dec->height = ch;
-		dec->current_frame = frameIndex;
+	if (dec->rgba && frameIndex == dec->current_frame) {
 		outFrame->data = dec->rgba;
-		outFrame->width = cw;
-		outFrame->height = ch;
-		outFrame->stride = cs;
-		outFrame->frame_index = frameIndex;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dec->width * 4;
+		outFrame->frame_index = dec->current_frame;
 		setDebug("decode cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d ptr=%p sample=%u",
 			(long long)requestedFrame,
 			(long long)frameIndex,
@@ -1220,62 +1114,8 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 		return 1;
 	}
 
-	/* Reuse current-frame cache (single-frame fast path for forward playback). */
-	if (dec->rgba && frameIndex == dec->current_frame) {
-		outFrame->data = dec->rgba;
-		outFrame->width = dec->width;
-		outFrame->height = dec->height;
-		outFrame->stride = dec->width * 4;
-		outFrame->frame_index = dec->current_frame;
-		setDebug("decode single-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d ptr=%p sample=%u",
-			(long long)requestedFrame,
-			(long long)frameIndex,
-			(long long)currentBefore,
-			(long long)outFrame->frame_index,
-			outFrame->width,
-			outFrame->height,
-			outFrame->stride,
-			(void*)outFrame->data,
-			sampleFrameBytes(dec));
-		unlockMutex();
-		return 1;
-	}
-
 	int didSeek = 0;
-	int backwardSeek = frameIndex < dec->current_frame;
-	int forwardFarSeek = frameIndex - dec->current_frame > 90;
-	int initialSeek = dec->current_frame < 0 && frameIndex > 30;
-
-	if (backwardSeek || forwardFarSeek || initialSeek) {
-		/* Backward seek within a reasonable range: decode a batch into cache. */
-		if (backwardSeek && dec->current_frame - frameIndex <= 90) {
-			uint8_t* batchData = decodeAndCacheRange(dec, frameIndex, FRAME_CACHE_SIZE, &cw, &ch, &cs);
-			if (batchData) {
-				memcpy(dec->rgba, batchData, (size_t)(ch * cs));
-				dec->width = cw;
-				dec->height = ch;
-				dec->current_frame = frameIndex;
-				outFrame->data = dec->rgba;
-				outFrame->width = cw;
-				outFrame->height = ch;
-				outFrame->stride = cs;
-				outFrame->frame_index = frameIndex;
-				setDebug("decode batch-seek requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d ptr=%p sample=%u",
-					(long long)requestedFrame,
-					(long long)frameIndex,
-					(long long)currentBefore,
-					(long long)outFrame->frame_index,
-					outFrame->width,
-					outFrame->height,
-					outFrame->stride,
-					(void*)outFrame->data,
-					sampleFrameBytes(dec));
-				unlockMutex();
-				return 1;
-			}
-		}
-
-		/* Normal seek (forward long jump, initial load, or backward beyond cache range). */
+	if (frameIndex < dec->current_frame || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
 		if (!seekDecoder(dec, frameIndex)) {
 			setDebug("decode seek-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
 				(long long)requestedFrame,
@@ -1354,7 +1194,6 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			return 0;
 		}
 
-		cacheAdd(dec, frameIndex, dec->rgba, dec->width, dec->height, dec->width * 4);
 		dec->current_frame = frameIndex;
 		outFrame->data = dec->rgba;
 		outFrame->width = dec->width;

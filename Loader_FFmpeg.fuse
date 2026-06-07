@@ -522,7 +522,7 @@ if RUNNING_IN_FUSION then
 		REG_Temporal = true,
 
 		REG_Fuse_NoEdit = true,
-		REG_Fuse_NoReload = TOOL_PUBLISHED,
+		REG_Fuse_NoReload = true,
 	})
 end
 --endregion Registration
