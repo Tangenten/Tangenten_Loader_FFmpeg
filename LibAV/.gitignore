@@ -11,6 +11,8 @@
 **/libswscale*.dylib
 **/libswresample*.dylib
 **/avcodec-*.dll
+**/avdevice-*.dll
+**/avfilter-*.dll
 **/avformat-*.dll
 **/avutil-*.dll
 **/swscale-*.dll

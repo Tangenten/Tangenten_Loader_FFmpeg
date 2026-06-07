@@ -1,5 +1,5 @@
 Composition {
-	CurrentTime = 114,
+	CurrentTime = 40.5,
 	RenderRange = { 0, 120 },
 	GlobalRange = { 0, 120 },
 	CurrentID = 62,
@@ -17,18 +17,10 @@ Composition {
 	OutputClips = {
 	},
 	Tools = {
-		Loader1 = Loader {
-			Clips = {
-			},
-			Inputs = {
-				["Gamut.SLogVersion"] = Input { Value = FuID { "SLog2" }, }
-			},
-			ViewInfo = OperatorInfo { Pos = { -56, 34.6363 } },
-		},
 		LoaderFFmpeg1 = Fuse.Loader_FFmpeg {
 			CtrlWZoom = false,
 			Inputs = {
-				InputPath = Input { Value = "/home/tangenten/Downloads/sample_2560x1440.mp4", },
+				InputPath = Input { Value = "Fuses:/Tangenten/.assets/Stock Media/14148274_3840_2160_30fps.mp4", },
 				ManualFrame = Input { Value = 520, }
 			},
 			ViewInfo = OperatorInfo { Pos = { -29.3333, 83.7273 } },
@@ -42,7 +34,7 @@ Composition {
 					Source = "Output",
 				}
 			},
-			ViewInfo = OperatorInfo { Pos = { 80.6667, 84.3333 } },
+			ViewInfo = OperatorInfo { Pos = { 81.3334, 84.3333 } },
 		}
 	},
 	Frames = {
