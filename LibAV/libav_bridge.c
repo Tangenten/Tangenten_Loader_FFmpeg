@@ -138,14 +138,6 @@ typedef struct TlavDecoder {
 	int width;
 	int height;
 	int last_scaled_rows;
-	int first_row_alpha_min;
-	int first_row_alpha_max;
-	int first_row_alpha_zero_count;
-	int last_row_alpha_min;
-	int last_row_alpha_max;
-	int last_row_alpha_zero_count;
-	unsigned int first_row_sample;
-	unsigned int last_row_sample;
 	enum AVPixelFormat sws_source_format;
 	int stream_index;
 	double fps;
@@ -990,54 +982,12 @@ static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLin
 		return 0;
 	}
 
-	const uint8_t* firstRow = dstBuffer;
-	const uint8_t* lastRow = dstBuffer + ((height - 1) * dstStride[0]);
-	dec->first_row_alpha_min = 255;
-	dec->first_row_alpha_max = 0;
-	dec->first_row_alpha_zero_count = 0;
-	dec->last_row_alpha_min = 255;
-	dec->last_row_alpha_max = 0;
-	dec->last_row_alpha_zero_count = 0;
-	dec->first_row_sample = 0;
-	dec->last_row_sample = 0;
-
-	for (int x = 0; x < width; x++) {
-		int firstOffset = x * 4;
-		int lastOffset = x * 4;
-		int firstAlpha = firstRow[firstOffset + 3];
-		int lastAlpha = lastRow[lastOffset + 3];
-		if (firstAlpha < dec->first_row_alpha_min) dec->first_row_alpha_min = firstAlpha;
-		if (firstAlpha > dec->first_row_alpha_max) dec->first_row_alpha_max = firstAlpha;
-		if (firstAlpha == 0) dec->first_row_alpha_zero_count++;
-		if (lastAlpha < dec->last_row_alpha_min) dec->last_row_alpha_min = lastAlpha;
-		if (lastAlpha > dec->last_row_alpha_max) dec->last_row_alpha_max = lastAlpha;
-		if (lastAlpha == 0) dec->last_row_alpha_zero_count++;
-
-		dec->first_row_sample = (dec->first_row_sample + ((unsigned int)firstRow[firstOffset] * 3u) + ((unsigned int)firstRow[firstOffset + 1] * 5u) + ((unsigned int)firstRow[firstOffset + 2] * 7u) + ((unsigned int)firstAlpha * 11u)) % 1000000007u;
-		dec->last_row_sample = (dec->last_row_sample + ((unsigned int)lastRow[lastOffset] * 13u) + ((unsigned int)lastRow[lastOffset + 1] * 17u) + ((unsigned int)lastRow[lastOffset + 2] * 19u) + ((unsigned int)lastAlpha * 23u)) % 1000000007u;
-	}
-
 	return 1;
 }
 
 static int convertFrame(TlavDecoder* dec)
 {
 	return convertFrameToBuffer(dec, NULL, 0);
-}
-
-static unsigned int sampleFrameBytes(TlavDecoder* dec)
-{
-	if (!dec || !dec->rgba || dec->rgba_size <= 0) {
-		return 0;
-	}
-
-	int limit = dec->rgba_size < 4096 ? dec->rgba_size : 4096;
-	unsigned int sample = 0;
-	for (int i = 0; i < limit; i++) {
-		sample = (sample + (unsigned int)dec->rgba[i] * (unsigned int)((i % 31) + 1)) % 1000000007u;
-	}
-
-	return sample;
 }
 
 static void invalidateRgbaCache(TlavDecoder* dec)
@@ -1309,16 +1259,13 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 		outFrame->height = dec->height;
 		outFrame->stride = dec->width * 4;
 		outFrame->frame_index = dec->current_frame;
-		setDebug("decode cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d ptr=%p sample=%u",
+		setDebug("decode cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
 			(long long)outFrame->frame_index,
 			outFrame->width,
-			outFrame->height,
-			outFrame->stride,
-			(void*)outFrame->data,
-			sampleFrameBytes(dec));
+			outFrame->height);
 		unlockMutex();
 		return 1;
 	}
@@ -1339,16 +1286,13 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 		outFrame->height = dec->height;
 		outFrame->stride = dec->width * 4;
 		outFrame->frame_index = dec->current_frame;
-		setDebug("decode current-frame-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d ptr=%p sample=%u",
+		setDebug("decode current-frame-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
 			(long long)outFrame->frame_index,
 			outFrame->width,
-			outFrame->height,
-			outFrame->stride,
-			(void*)outFrame->data,
-			sampleFrameBytes(dec));
+			outFrame->height);
 		unlockMutex();
 		return 1;
 	}
@@ -1376,7 +1320,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 				outFrame->height = dec->height;
 				outFrame->stride = dec->width * 4;
 				outFrame->frame_index = dec->current_frame;
-				setDebug("decode eof-return-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld seek=%d skipped=%d size=%dx%d stride=%d ptr=%p sample=%u",
+				setDebug("decode eof-return-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld seek=%d skipped=%d size=%dx%d",
 					(long long)requestedFrame,
 					(long long)frameIndex,
 					(long long)currentBefore,
@@ -1384,10 +1328,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 					didSeek,
 					skippedFrames,
 					outFrame->width,
-					outFrame->height,
-					outFrame->stride,
-					(void*)outFrame->data,
-					sampleFrameBytes(dec));
+					outFrame->height);
 				unlockMutex();
 				return 1;
 			}
@@ -1439,7 +1380,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 		outFrame->height = dec->height;
 		outFrame->stride = dec->width * 4;
 		outFrame->frame_index = frameIndex;
-		setDebug("decode converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d stride=%d swsRows=%d firstA=%d-%d firstA0=%d lastA=%d-%d lastA0=%d firstRowSample=%u lastRowSample=%u ptr=%p sample=%u",
+		setDebug("decode converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
@@ -1450,18 +1391,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			(long long)outFrame->frame_index,
 			outFrame->width,
 			outFrame->height,
-			outFrame->stride,
-			dec->last_scaled_rows,
-			dec->first_row_alpha_min,
-			dec->first_row_alpha_max,
-			dec->first_row_alpha_zero_count,
-			dec->last_row_alpha_min,
-			dec->last_row_alpha_max,
-			dec->last_row_alpha_zero_count,
-			dec->first_row_sample,
-			dec->last_row_sample,
-			(void*)outFrame->data,
-			sampleFrameBytes(dec));
+			dec->last_scaled_rows);
 		unlockMutex();
 		return 1;
 	}
@@ -1497,16 +1427,13 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		}
 
 		fillDirectOutFrame(dec, outFrame, dstBuffer, dstLineStride, dec->current_frame);
-		setDebug("decode-into cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d dst=%p sample=%u",
+		setDebug("decode-into cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
 			(long long)outFrame->frame_index,
 			outFrame->width,
-			outFrame->height,
-			outFrame->stride,
-			(void*)dstBuffer,
-			sampleFrameBytes(dec));
+			outFrame->height);
 		unlockMutex();
 		return 1;
 	}
@@ -1566,7 +1493,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 				}
 
 				fillDirectOutFrame(dec, outFrame, dstBuffer, dstLineStride, dec->current_frame);
-				setDebug("decode-into eof-return-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld seek=%d skipped=%d size=%dx%d stride=%d dst=%p sample=%u",
+				setDebug("decode-into eof-return-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld seek=%d skipped=%d size=%dx%d",
 					(long long)requestedFrame,
 					(long long)frameIndex,
 					(long long)currentBefore,
@@ -1574,10 +1501,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 					didSeek,
 					skippedFrames,
 					outFrame->width,
-					outFrame->height,
-					outFrame->stride,
-					(void*)dstBuffer,
-					sampleFrameBytes(dec));
+					outFrame->height);
 				unlockMutex();
 				return 1;
 			}
@@ -1626,7 +1550,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		invalidateRgbaCache(dec);
 		dec->current_frame = frameIndex;
 		fillDirectOutFrame(dec, outFrame, dstBuffer, dstLineStride, frameIndex);
-		setDebug("decode-into converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d stride=%d swsRows=%d firstA=%d-%d firstA0=%d lastA=%d-%d lastA0=%d firstRowSample=%u lastRowSample=%u dst=%p",
+		setDebug("decode-into converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
@@ -1637,17 +1561,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			(long long)outFrame->frame_index,
 			outFrame->width,
 			outFrame->height,
-			outFrame->stride,
-			dec->last_scaled_rows,
-			dec->first_row_alpha_min,
-			dec->first_row_alpha_max,
-			dec->first_row_alpha_zero_count,
-			dec->last_row_alpha_min,
-			dec->last_row_alpha_max,
-			dec->last_row_alpha_zero_count,
-			dec->first_row_sample,
-			dec->last_row_sample,
-			(void*)dstBuffer);
+			dec->last_scaled_rows);
 		unlockMutex();
 		return 1;
 	}
