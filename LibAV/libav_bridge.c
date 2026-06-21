@@ -120,6 +120,12 @@ typedef struct TlavApi {
 } TlavApi;
 
 typedef struct TlavDecoder {
+#ifdef _WIN32
+	CRITICAL_SECTION mutex;
+#else
+	pthread_mutex_t mutex;
+#endif
+	int mutex_initialized;
 	AVFormatContext* format;
 	AVCodecContext* codec;
 	const AVCodec* decoder;
@@ -155,9 +161,16 @@ typedef struct TlavDecoder {
 static TlavApi gApi;
 static int gApiLoaded = 0;
 static char gLibraryDir[PATH_MAX] = {0};
-static char gLastError[1024] = {0};
-static char gLastDebug[2048] = {0};
-static char gLastLoadError[1024] = {0};
+
+#ifdef _WIN32
+#define TLAV_THREAD_LOCAL __declspec(thread)
+#else
+#define TLAV_THREAD_LOCAL __thread
+#endif
+
+static TLAV_THREAD_LOCAL char gLastError[1024] = {0};
+static TLAV_THREAD_LOCAL char gLastDebug[2048] = {0};
+static TLAV_THREAD_LOCAL char gLastLoadError[1024] = {0};
 
 #ifdef _WIN32
 static CRITICAL_SECTION gMutex;
@@ -185,6 +198,63 @@ static void unlockMutex(void)
 	pthread_mutex_unlock(&gMutex);
 }
 #endif
+
+static int initDecoderMutex(TlavDecoder* dec)
+{
+	if (!dec) {
+		return 0;
+	}
+
+#ifdef _WIN32
+	InitializeCriticalSection(&dec->mutex);
+#else
+	if (pthread_mutex_init(&dec->mutex, NULL) != 0) {
+		return 0;
+	}
+#endif
+	dec->mutex_initialized = 1;
+	return 1;
+}
+
+static void lockDecoder(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	EnterCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_lock(&dec->mutex);
+#endif
+}
+
+static void unlockDecoder(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	LeaveCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_unlock(&dec->mutex);
+#endif
+}
+
+static void destroyDecoderMutex(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	DeleteCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_destroy(&dec->mutex);
+#endif
+	dec->mutex_initialized = 0;
+}
 
 static void setError(const char* fmt, ...)
 {
@@ -751,7 +821,7 @@ static void setupHardware(TlavDecoder* dec)
 	}
 }
 
-static void closeDecoder(TlavDecoder* dec)
+static void freeDecoderResources(TlavDecoder* dec)
 {
 	if (!dec) {
 		return;
@@ -781,7 +851,18 @@ static void closeDecoder(TlavDecoder* dec)
 	if (dec->format && gApi.avformat_close_input) {
 		gApi.avformat_close_input(&dec->format);
 	}
+}
 
+static void closeDecoder(TlavDecoder* dec)
+{
+	if (!dec) {
+		return;
+	}
+
+	lockDecoder(dec);
+	freeDecoderResources(dec);
+	unlockDecoder(dec);
+	destroyDecoderMutex(dec);
 	free(dec);
 }
 
@@ -1040,8 +1121,8 @@ TLAV_EXPORT const char* tlav_version(void)
 		return "bridge loaded, libav unavailable";
 	}
 
-	static char version[128];
-	snprintf(version, sizeof(version), "bridge 1.2.1, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
+	static TLAV_THREAD_LOCAL char version[128];
+	snprintf(version, sizeof(version), "bridge 1.2.2, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
 	version[sizeof(version) - 1] = '\0';
 	unlockMutex();
 	return version;
@@ -1087,6 +1168,13 @@ TLAV_EXPORT void* tlav_open(const char* path, TlavInfo* info)
 	if (!dec) {
 		setError("Could not allocate decoder state");
 		setDebug("open failed allocate-decoder path=%s", path);
+		unlockMutex();
+		return NULL;
+	}
+	if (!initDecoderMutex(dec)) {
+		setError("Could not initialize decoder lock");
+		setDebug("open failed init-lock path=%s", path);
+		free(dec);
 		unlockMutex();
 		return NULL;
 	}
@@ -1233,18 +1321,18 @@ TLAV_EXPORT void* tlav_open(const char* path, TlavInfo* info)
 
 TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFrame)
 {
-	lockMutex();
 	clearError();
 
 	TlavDecoder* dec = (TlavDecoder*)handle;
 	int64_t requestedFrame = frameIndex;
-	int64_t currentBefore = dec ? dec->current_frame : -999999;
 	if (!dec || !outFrame) {
 		setError("Decode called with invalid handle");
 		setDebug("decode failed invalid-handle requested=%lld", (long long)requestedFrame);
-		unlockMutex();
 		return 0;
 	}
+
+	lockDecoder(dec);
+	int64_t currentBefore = dec->current_frame;
 
 	if (frameIndex < 0) {
 		frameIndex = 0;
@@ -1266,7 +1354,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			(long long)outFrame->frame_index,
 			outFrame->width,
 			outFrame->height);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 
@@ -1277,7 +1365,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 				(long long)frameIndex,
 				(long long)currentBefore,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1293,7 +1381,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			(long long)outFrame->frame_index,
 			outFrame->width,
 			outFrame->height);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 
@@ -1305,7 +1393,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 				(long long)frameIndex,
 				(long long)currentBefore,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 		didSeek = 1;
@@ -1329,7 +1417,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 					skippedFrames,
 					outFrame->width,
 					outFrame->height);
-				unlockMutex();
+				unlockDecoder(dec);
 				return 1;
 			}
 
@@ -1343,7 +1431,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 				didSeek,
 				skippedFrames,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1370,7 +1458,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 				didSeek,
 				skippedFrames,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1392,25 +1480,25 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			outFrame->width,
 			outFrame->height,
 			dec->last_scaled_rows);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 }
 
 TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame)
 {
-	lockMutex();
 	clearError();
 
 	TlavDecoder* dec = (TlavDecoder*)handle;
 	int64_t requestedFrame = frameIndex;
-	int64_t currentBefore = dec ? dec->current_frame : -999999;
 	if (!dec || !outFrame || !dstBuffer || dstLineStride == 0) {
 		setError("Direct decode called with invalid handle or destination");
 		setDebug("decode-into failed invalid-args requested=%lld dst=%p stride=%d", (long long)requestedFrame, (void*)dstBuffer, dstLineStride);
-		unlockMutex();
 		return 0;
 	}
+
+	lockDecoder(dec);
+	int64_t currentBefore = dec->current_frame;
 
 	if (frameIndex < 0) {
 		frameIndex = 0;
@@ -1422,7 +1510,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 	if (dec->rgba && frameIndex == dec->current_frame) {
 		if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
 			setDebug("decode-into cache-copy-failed requested=%lld clamped=%lld error=%s", (long long)requestedFrame, (long long)frameIndex, gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1434,7 +1522,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			(long long)outFrame->frame_index,
 			outFrame->width,
 			outFrame->height);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 
@@ -1445,7 +1533,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 				(long long)frameIndex,
 				(long long)currentBefore,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1460,7 +1548,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			outFrame->stride,
 			dec->last_scaled_rows,
 			(void*)dstBuffer);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 
@@ -1472,7 +1560,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 				(long long)frameIndex,
 				(long long)currentBefore,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 		didSeek = 1;
@@ -1488,7 +1576,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 						(long long)frameIndex,
 						(long long)currentBefore,
 						gLastError);
-					unlockMutex();
+					unlockDecoder(dec);
 					return 0;
 				}
 
@@ -1502,7 +1590,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 					skippedFrames,
 					outFrame->width,
 					outFrame->height);
-				unlockMutex();
+				unlockDecoder(dec);
 				return 1;
 			}
 
@@ -1516,7 +1604,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 				didSeek,
 				skippedFrames,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1543,7 +1631,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 				didSeek,
 				skippedFrames,
 				gLastError);
-			unlockMutex();
+			unlockDecoder(dec);
 			return 0;
 		}
 
@@ -1562,14 +1650,12 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			outFrame->width,
 			outFrame->height,
 			dec->last_scaled_rows);
-		unlockMutex();
+		unlockDecoder(dec);
 		return 1;
 	}
 }
 
 TLAV_EXPORT void tlav_close(void* handle)
 {
-	lockMutex();
 	closeDecoder((TlavDecoder*)handle);
-	unlockMutex();
 }
