@@ -852,6 +852,21 @@ local function resetButton(input)
 	end
 end
 
+local function getStaticSourceValue(input, defaultValue)
+	if not input or not input.GetSource then return defaultValue end
+
+	local ok, source = pcall(function()
+		if REQF_SecondaryTime then
+			return input:GetSource(0, REQF_SecondaryTime, REQF_SecondaryTime)
+		end
+
+		return input:GetSource(0)
+	end)
+	if not ok or not source then return defaultValue end
+
+	return source.Value
+end
+
 -- Read clip metadata with a throwaway decoder handle. This stays separate from
 -- the shared LOADER_DECODER (used by Process on another thread) so probing from
 -- the UI thread never races the render decoder.
@@ -879,7 +894,7 @@ end
 -- value and the reset default match the clip, and grow the slider scale so the
 -- new value stays reachable. Playback Speed stays at the user's multiplier; the
 -- actual rate comes from the clip's own fps in computeFrameIndex.
-local function applyClipDefaults(info)
+local function applyClipDefaults(info, seedEndFrame)
 	if not info or not Number then return end
 
 	local frameCount = getInfoFrameCount(info)
@@ -887,9 +902,29 @@ local function applyClipDefaults(info)
 		local maxScale = math.max(frameCount, 1)
 		if InStartFrame then InStartFrame:SetAttrs({ INP_MaxScale = maxScale }) end
 		InEndFrame:SetAttrs({ INP_Default = frameCount, INP_MaxScale = maxScale })
-		InEndFrame:SetSource(Number(frameCount), 0, 0)
-		logInfo("[defaults] EndFrame", "value", frameCount, "maxScale", maxScale)
+		if seedEndFrame then
+			InEndFrame:SetSource(Number(frameCount), 0, 0)
+		end
+		logInfo("[defaults] EndFrame", "value", frameCount, "maxScale", maxScale, "seed", seedEndFrame)
 	end
+end
+
+local function seedClipDefaultsFromCurrentPath()
+	local inputPath = getStaticSourceValue(InInputPath, "")
+	if inputPath == "" then
+		logInfo("[defaults] No path to seed")
+		return
+	end
+
+	local info, mapped = probeClipInfo(self.Comp, inputPath)
+	if not info then
+		logInfo("[defaults] No clip info to seed", mapped)
+		return
+	end
+
+	local endFrame = math.max(0, roundToInt(getStaticSourceValue(InEndFrame, 0) or 0))
+	applyClipDefaults(info, endFrame == 0)
+	setInfoStatus(info, mapped)
 end
 
 function NotifyChanged(inp, param, time)
@@ -906,7 +941,7 @@ function NotifyChanged(inp, param, time)
 		closeDecoder()
 		local info, mapped = probeClipInfo(self.Comp, param.Value)
 		if info then
-			applyClipDefaults(info)
+			applyClipDefaults(info, true)
 			setInfoStatus(info, mapped)
 		else
 			setStatusHtml(makeStatusHtml("Video path changed", { "Render a frame to load metadata." }, false))
@@ -930,6 +965,7 @@ function NotifyChanged(inp, param, time)
 
 	if inp == InReloadBtn and param.Value >= 0.5 then
 		closeDecoder()
+		seedClipDefaultsFromCurrentPath()
 		local execute = string.format([[
 local tool = comp:FindTool(%q)
 if tool == nil then return end
@@ -960,6 +996,7 @@ end
 --region OnAddToFlow
 function OnAddToFlow()
 	updatePlaybackVisibility(0)
+	seedClipDefaultsFromCurrentPath()
 	if TOOL_RUN_TESTS_ON_STARTUP then
 		Tests()
 	end
