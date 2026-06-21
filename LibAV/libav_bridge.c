@@ -273,9 +273,9 @@ static void joinPath(char* dst, size_t dstSize, const char* dir, const char* fil
 	if (ret < 0 || (size_t)ret >= dstSize) dst[dstSize - 1] = '\0';
 }
 
-/* Build the exact runtime file name for a libav major version using the
- * platform's soname convention: lib<root>.so.<major> / lib<root>.<major>.dylib
- * / <root>-<major>.dll. Used to prefer the major this bridge was built against. */
+/* Build runtime file names from the library root. The exact name prefers the
+ * major this bridge was built against; the plain name lets package symlinks or
+ * unversioned DLLs select the installed runtime without hardcoded major lists. */
 static void exactLibName(char* dst, size_t dstSize, const char* libRoot, int major)
 {
 #ifdef _WIN32
@@ -284,6 +284,18 @@ static void exactLibName(char* dst, size_t dstSize, const char* libRoot, int maj
 	snprintf(dst, dstSize, "lib%s.%d.dylib", libRoot, major);
 #else
 	snprintf(dst, dstSize, "lib%s.so.%d", libRoot, major);
+#endif
+	dst[dstSize - 1] = '\0';
+}
+
+static void plainLibName(char* dst, size_t dstSize, const char* libRoot)
+{
+#ifdef _WIN32
+	snprintf(dst, dstSize, "%s.dll", libRoot);
+#elif defined(__APPLE__)
+	snprintf(dst, dstSize, "lib%s.dylib", libRoot);
+#else
+	snprintf(dst, dstSize, "lib%s.so", libRoot);
 #endif
 	dst[dstSize - 1] = '\0';
 }
@@ -309,7 +321,7 @@ static void* loadSymbol(void* handle, const char* symbolName)
 /* ---- Dynamic library discovery ---- */
 
 #ifdef _WIN32
-/* Extract version from "avcodec-62.dll" -> 62, or -1. */
+/* Extract version from "avcodec-<major>.dll", or -1. */
 static int dllVersion(const char* name)
 {
 	const char* dot = strrchr(name, '.');
@@ -327,7 +339,7 @@ static int matchLibrary(const char* name, const char* lib) {
 	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dll");
 }
 #elif defined(__APPLE__)
-/* Extract version from "libavutil.60.dylib" -> 60, or -1. */
+/* Extract version from "libavutil.<major>.dylib", or -1. */
 static int dylibVersion(const char* name)
 {
 	const char* dot = strrchr(name, '.');
@@ -351,7 +363,7 @@ static int matchLibrary(const char* name, const char* lib) {
 	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dylib");
 }
 #else
-/* Extract version from "libavutil.so.60" -> 60, or -1. */
+/* Extract version from "libavutil.so.<major>", or -1. */
 static int soVersion(const char* name)
 {
 	const char* dot = strrchr(name, '.');
@@ -413,8 +425,8 @@ static int scanLibraries(const char* lib, struct LibEntry* entries, int max)
 }
 
 /* Try to load a library, preferring the exact major this bridge was built
- * against, then the highest discovered file, then the static fallback. */
-static void* loadLibrary(const char* label, const char* libRoot, int preferredMajor, const char* const* fallback)
+ * against, then the highest discovered file, then the unversioned name. */
+static void* loadLibrary(const char* label, const char* libRoot, int preferredMajor)
 {
 	char path[PATH_MAX];
 
@@ -435,14 +447,12 @@ static void* loadLibrary(const char* label, const char* libRoot, int preferredMa
 			if (handle) return handle;
 		}
 	}
-	/* Static fallback. */
-	if (fallback) {
-		for (int i = 0; fallback[i] != NULL; i++) {
-			joinPath(path, sizeof(path), gLibraryDir, fallback[i]);
-			void* handle = loadSharedObject(path);
-			if (handle) return handle;
-		}
-	}
+	char plain[64];
+	plainLibName(plain, sizeof(plain), libRoot);
+	joinPath(path, sizeof(path), gLibraryDir, plain);
+	void* handle = loadSharedObject(path);
+	if (handle) return handle;
+
 	setError("Missing %s in %s", label, gLibraryDir);
 	return NULL;
 }
@@ -558,36 +568,16 @@ static int loadApi(void)
 		return 0;
 	}
 
-#ifdef _WIN32
-	static const char* avutilNames[] = {"avutil-60.dll", "avutil-59.dll", "avutil-58.dll", "avutil-57.dll", "avutil-56.dll", "avutil.dll", NULL};
-	static const char* swresampleNames[] = {"swresample-6.dll", "swresample-5.dll", "swresample-4.dll", "swresample-3.dll", "swresample.dll", NULL};
-	static const char* avcodecNames[] = {"avcodec-62.dll", "avcodec-61.dll", "avcodec-60.dll", "avcodec-59.dll", "avcodec-58.dll", "avcodec.dll", NULL};
-	static const char* avformatNames[] = {"avformat-62.dll", "avformat-61.dll", "avformat-60.dll", "avformat-59.dll", "avformat-58.dll", "avformat.dll", NULL};
-	static const char* swscaleNames[] = {"swscale-9.dll", "swscale-8.dll", "swscale-7.dll", "swscale-6.dll", "swscale-5.dll", "swscale.dll", NULL};
-#elif defined(__APPLE__)
-	static const char* avutilNames[] = {"libavutil.60.dylib", "libavutil.59.dylib", "libavutil.58.dylib", "libavutil.57.dylib", "libavutil.56.dylib", "libavutil.dylib", NULL};
-	static const char* swresampleNames[] = {"libswresample.6.dylib", "libswresample.5.dylib", "libswresample.4.dylib", "libswresample.3.dylib", "libswresample.dylib", NULL};
-	static const char* avcodecNames[] = {"libavcodec.62.dylib", "libavcodec.61.dylib", "libavcodec.60.dylib", "libavcodec.59.dylib", "libavcodec.58.dylib", "libavcodec.dylib", NULL};
-	static const char* avformatNames[] = {"libavformat.62.dylib", "libavformat.61.dylib", "libavformat.60.dylib", "libavformat.59.dylib", "libavformat.58.dylib", "libavformat.dylib", NULL};
-	static const char* swscaleNames[] = {"libswscale.9.dylib", "libswscale.8.dylib", "libswscale.7.dylib", "libswscale.6.dylib", "libswscale.5.dylib", "libswscale.dylib", NULL};
-#else
-	static const char* avutilNames[] = {"libavutil.so.60", "libavutil.so.59", "libavutil.so.58", "libavutil.so.57", "libavutil.so.56", "libavutil.so", NULL};
-	static const char* swresampleNames[] = {"libswresample.so.6", "libswresample.so.5", "libswresample.so.4", "libswresample.so.3", "libswresample.so", NULL};
-	static const char* avcodecNames[] = {"libavcodec.so.62", "libavcodec.so.61", "libavcodec.so.60", "libavcodec.so.59", "libavcodec.so.58", "libavcodec.so", NULL};
-	static const char* avformatNames[] = {"libavformat.so.62", "libavformat.so.61", "libavformat.so.60", "libavformat.so.59", "libavformat.so.58", "libavformat.so", NULL};
-	static const char* swscaleNames[] = {"libswscale.so.9", "libswscale.so.8", "libswscale.so.7", "libswscale.so.6", "libswscale.so.5", "libswscale.so", NULL};
-#endif
-
 	memset(&gApi, 0, sizeof(gApi));
-	gApi.avutil = loadLibrary("libavutil", "avutil", LIBAVUTIL_VERSION_MAJOR, avutilNames);
+	gApi.avutil = loadLibrary("libavutil", "avutil", LIBAVUTIL_VERSION_MAJOR);
 	if (!gApi.avutil) return 0;
-	gApi.swresample = loadLibrary("libswresample", "swresample", 0, swresampleNames);
+	gApi.swresample = loadLibrary("libswresample", "swresample", 0);
 	if (!gApi.swresample) return 0;
-	gApi.avcodec = loadLibrary("libavcodec", "avcodec", LIBAVCODEC_VERSION_MAJOR, avcodecNames);
+	gApi.avcodec = loadLibrary("libavcodec", "avcodec", LIBAVCODEC_VERSION_MAJOR);
 	if (!gApi.avcodec) return 0;
-	gApi.avformat = loadLibrary("libavformat", "avformat", LIBAVFORMAT_VERSION_MAJOR, avformatNames);
+	gApi.avformat = loadLibrary("libavformat", "avformat", LIBAVFORMAT_VERSION_MAJOR);
 	if (!gApi.avformat) return 0;
-	gApi.swscale = loadLibrary("libswscale", "swscale", LIBSWSCALE_VERSION_MAJOR, swscaleNames);
+	gApi.swscale = loadLibrary("libswscale", "swscale", LIBSWSCALE_VERSION_MAJOR);
 	if (!gApi.swscale) return 0;
 
 	/* Reject ABI-incompatible majors before any struct field is read. */

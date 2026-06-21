@@ -50,7 +50,7 @@ If the versions do not match, the tool refuses to decode and shows an
 versions it found and the ones it needs. Install runtime libraries with those
 majors and reload the node.
 
-Required sonames for an FFmpeg 8.x bridge:
+Example runtime library names for the current FFmpeg 8.x bridge build:
 
   Linux:    libavutil.so.60   libavcodec.so.62   libavformat.so.62
             libswscale.so.9   libswresample.so.6
@@ -61,7 +61,8 @@ Required sonames for an FFmpeg 8.x bridge:
 
 Get matching shared builds from your distribution (when it ships that FFmpeg
 release), from the builds linked at ffmpeg.org, or by compiling FFmpeg yourself
-with --enable-shared. On Linux the build folder also accepts an unversioned
-fallback name (libavcodec.so, ...); the major it points to must still match.
-
-
+with --enable-shared. The bridge first tries the exact major it was built
+against, then scans the platform folder for matching libav files and tries the
+highest discovered version, then tries the unversioned runtime name
+(libavcodec.so, libavcodec.dylib, avcodec.dll, ...). The major it loads must
+still match the bridge's build headers.
