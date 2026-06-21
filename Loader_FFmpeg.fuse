@@ -795,7 +795,7 @@ function Create()
 		INP_Passive = true,
 		IC_NoLabel = true,
 		IC_NoReset = true,
-		IC_ControlPage = 2,
+		IC_ControlPage = 0,
 	})
 end
 --endregion Create
