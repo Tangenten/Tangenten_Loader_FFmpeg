@@ -246,6 +246,7 @@ local function computeFrameIndex(req, info, comp)
 	local startFrame = math.max(0, roundToInt(InStartFrame:GetValue(req).Value or 0))
 	local endFrame = math.max(0, roundToInt(InEndFrame:GetValue(req).Value or 0))
 	local manualFrame = math.max(0, roundToInt(InManualFrame:GetValue(req).Value or 0))
+	local startOffset = math.max(0, roundToInt(InStartOffset:GetValue(req).Value or 0))
 
 	-- End/FPS are seeded from the clip on load; the 0 fallbacks below are kept
 	-- only as a safety net for unseeded states (e.g. a comp opened with a path
@@ -263,11 +264,13 @@ local function computeFrameIndex(req, info, comp)
 		local compFps = getCompFrameRate(comp)
 		local sourceFps = info.fps and info.fps > 0 and info.fps or compFps
 		local rate = playbackFps > 0 and playbackFps or sourceFps
-		local logical = math.floor(((req.Time or 0) * (rate / compFps)) + 0.000001)
-		if logical < 0 then logical = 0 end
-		logInfo("[frame-map] Auto inputs", "time", req.Time, "compFps", compFps, "sourceFps", sourceFps, "playbackFps", playbackFps, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
+		local logical = math.floor((((req.Time or 0) - startOffset) * (rate / compFps)) + 0.000001)
+		logInfo("[frame-map] Auto inputs", "time", req.Time, "startOffset", startOffset, "compFps", compFps, "sourceFps", sourceFps, "playbackFps", playbackFps, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
 
-		if loopMode == 0 then
+		if logical < 0 then
+			-- Before the start offset: output nothing until playback begins.
+			blank = true
+		elseif loopMode == 0 then
 			idxInSubset = umod(logical, subsetFrameCount)
 		elseif loopMode == 1 then
 			idxInSubset = pingpong(logical, subsetFrameCount)
@@ -596,7 +599,7 @@ function Create()
 		LINKS_Name = "<b style='color:#c8b8d8;'>Playback</b>",
 		INP_Default = 1.0,
 		LBLC_DropDownButton = true,
-		LBLC_NumInputs = 7,
+		LBLC_NumInputs = 8,
 		LBLC_NestLevel = 1,
 		IC_ControlPage = 0,
 		INP_DoNotifyChanged = false,
@@ -647,6 +650,16 @@ function Create()
 		{ CCS_AddString = "Ping Pong" },
 		{ CCS_AddString = "Hold Last" },
 		{ CCS_AddString = "Blank" },
+	})
+
+	InStartOffset = self:AddInput("Start Offset", "StartOffset", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "SliderControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_MinScale = 0,
+		INP_MaxScale = 1000,
+		IC_ControlPage = 0,
 	})
 
 	-- Start/End share a single dual-handle range slider (RangeControl group).
@@ -817,6 +830,7 @@ local function updatePlaybackVisibility(mode)
 	if InPlaybackFPS then InPlaybackFPS:SetAttrs({ IC_Visible = not manual }) end
 	if InReverse then InReverse:SetAttrs({ IC_Visible = not manual }) end
 	if InLoopMode then InLoopMode:SetAttrs({ IC_Visible = not manual }) end
+	if InStartOffset then InStartOffset:SetAttrs({ IC_Visible = not manual }) end
 	if InStartFrame then InStartFrame:SetAttrs({ IC_Visible = true }) end
 	if InEndFrame then InEndFrame:SetAttrs({ IC_Visible = true }) end
 end
