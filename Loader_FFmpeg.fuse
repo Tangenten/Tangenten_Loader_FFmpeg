@@ -544,6 +544,71 @@ local function copyFrameToImage(outImg, frame)
 	logInfo("[image] Wrote scanlines", "frame", tonumber(frame.frame_index), "size", width .. "x" .. height, "stride", stride, "rowBytes", rowBytes, "srcPtr", tostring(frame.data), "srcSample", sampleBytes(frame.data, byteCount))
 	return true
 end
+
+local function getDirectImageTarget(outImg, width, height)
+	local ffi = LOADER_LIBAV and LOADER_LIBAV.ffi
+	if not ffi then return nil, nil, "LibAV FFI unavailable" end
+	if not outImg.GetScanLine then return nil, nil, "Fusion Image:GetScanLine is unavailable" end
+
+	local rawScanlines = outImg:GetScanLine()
+	if rawScanlines == nil then
+		return nil, nil, "Image:GetScanLine returned nil"
+	end
+
+	local scanlines = ffi.cast("uint8_t **", rawScanlines)
+	if scanlines == ffi.NULL then
+		return nil, nil, "Image:GetScanLine returned a null pointer"
+	end
+
+	local rowBytes = width * 4
+	local topRow = scanlines[height - 1]
+	if topRow == nil or topRow == ffi.NULL then
+		return nil, nil, "Top scanline is null"
+	end
+	if height == 1 then
+		return topRow, rowBytes, nil
+	end
+
+	local secondRow = scanlines[height - 2]
+	if secondRow == nil or secondRow == ffi.NULL then
+		return nil, nil, "Second scanline is null"
+	end
+
+	local stride = tonumber(secondRow - topRow)
+	if not stride or math.abs(stride) < rowBytes then
+		return nil, nil, "Scanline stride is too small"
+	end
+
+	for y = 0, height - 1 do
+		local expected = topRow + ((height - 1 - y) * stride)
+		if scanlines[y] ~= expected then
+			return nil, nil, "Scanlines are not contiguous"
+		end
+	end
+
+	return topRow, stride, nil
+end
+
+local function decodeFrameIntoImage(decoder, frameIndex, outImg)
+	if not decoder.decodeInto then
+		return nil, "LibAV bridge does not expose direct image decode"
+	end
+
+	local width = math.max(1, math.floor(decoder.info.width or 1))
+	local height = math.max(1, math.floor(decoder.info.height or 1))
+	local dst, stride, targetErr = getDirectImageTarget(outImg, width, height)
+	if not dst then
+		return nil, targetErr
+	end
+
+	local frame, decodeErr = decoder:decodeInto(frameIndex, dst, stride)
+	if not frame then
+		return nil, decodeErr
+	end
+
+	logInfo("[image] Direct decode", "frame", tonumber(frame.frame_index), "size", tonumber(frame.width) .. "x" .. tonumber(frame.height), "stride", tonumber(frame.stride), "dst", tostring(dst))
+	return frame, nil
+end
 --endregion Fusion image/status
 
 --region Registration
@@ -1126,28 +1191,35 @@ function Process(req)
 		return
 	end
 
-	logInfo("[process] Decoding frame", frameIndex)
-	local frame, decodeErr = decoder:decode(frameIndex)
-	logInfo("[process] Decode result", "ok", frame ~= nil, "err", tostring(decodeErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
-	if not frame then
-		setErrorStatus("Frame decode failed", decodeErr)
+	local outImg = createImage(self, req, decoder.info.width, decoder.info.height, false)
+	logInfo("[process] Created output image", "width", tonumber(decoder.info.width), "height", tonumber(decoder.info.height), "hasGetScanLine", outImg.GetScanLine ~= nil)
+	if not outImg.GetScanLine then
+		setErrorStatus("Image output failed", "Fusion Image:GetScanLine is unavailable")
 		setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
 		return
 	end
 
-	local outImg = createImage(self, req, frame.width, frame.height, false)
-	logInfo("[process] Created output image", "width", tonumber(frame.width), "height", tonumber(frame.height), "hasGetScanLine", outImg.GetScanLine ~= nil)
-	if not outImg.GetScanLine then
-		setErrorStatus("Image output failed", "Fusion Image:GetScanLine is unavailable")
-		setNoDataOutput(self, req, frame.width, frame.height)
-		return
-	end
+	logInfo("[process] Direct decoding frame", frameIndex)
+	local frame, directErr = decodeFrameIntoImage(decoder, frameIndex, outImg)
+	logInfo("[process] Direct decode result", "ok", frame ~= nil, "err", tostring(directErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
+	if not frame then
+		logInfo("[process] Falling back to buffered decode", tostring(directErr))
+		frame = nil
+		local decodeErr
+		frame, decodeErr = decoder:decode(frameIndex)
+		logInfo("[process] Decode result", "ok", frame ~= nil, "err", tostring(decodeErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
+		if not frame then
+			setErrorStatus("Frame decode failed", decodeErr)
+			setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
+			return
+		end
 
-	local ok, fromMemoryErr = copyFrameToImage(outImg, frame)
-	if not ok then
-		setErrorStatus("Image output failed", fromMemoryErr)
-		setNoDataOutput(self, req, frame.width, frame.height)
-		return
+		local ok, fromMemoryErr = copyFrameToImage(outImg, frame)
+		if not ok then
+			setErrorStatus("Image output failed", fromMemoryErr)
+			setNoDataOutput(self, req, frame.width, frame.height)
+			return
+		end
 	end
 
 	logInfo("[process] Setting output", "time", req.Time, "frameIndex", frameIndex, "reportedFrame", tonumber(frame.frame_index), "width", tonumber(frame.width), "height", tonumber(frame.height))

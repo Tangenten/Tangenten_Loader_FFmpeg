@@ -39,6 +39,7 @@ if not _G.__TANGENTEN_LIBAV_CDEF_DONE then
 		const char* tlav_last_debug(void);
 		void* tlav_open(const char* path, TlavInfo* info);
 		int tlav_decode(void* handle, int64_t frame_index, TlavFrame* frame);
+		int tlav_decode_into(void* handle, int64_t frame_index, uint8_t* dst_buffer, int dst_line_stride, TlavFrame* frame);
 		void tlav_close(void* handle);
 		const char* tlav_hw_accel(void* handle);
 	]])
@@ -59,6 +60,10 @@ pcall(ffi.cdef, [[
 if _G.__TANGENTEN_LIBAV_CDEF_ERROR then
 	return nil, _G.__TANGENTEN_LIBAV_CDEF_ERROR
 end
+
+pcall(ffi.cdef, [[
+	int tlav_decode_into(void* handle, int64_t frame_index, uint8_t* dst_buffer, int dst_line_stride, TlavFrame* frame);
+]])
 
 local function getPathSeparator()
 	return package.config:sub(1, 1)
@@ -205,6 +210,21 @@ local function build(fuseDir)
 			return ffiString(loadedC().tlav_hw_accel(handle))
 		end)
 		decoder.info.hwAccel = (hwOk and hwName) or ""
+
+		local decodeIntoOk, decodeIntoFn = pcall(function()
+			return loadedC().tlav_decode_into
+		end)
+		if decodeIntoOk and decodeIntoFn then
+			function decoder:decodeInto(frameIndex, dstBuffer, dstLineStride)
+				local frame = ffi.new("TlavFrame")
+				local ok = decodeIntoFn(self.handle, frameIndex, ffi.cast("uint8_t*", dstBuffer), dstLineStride, frame)
+				if ok == 0 then
+					return nil, module.lastError()
+				end
+
+				return frame
+			end
+		end
 
 		function decoder:decode(frameIndex)
 			local frame = ffi.new("TlavFrame")

@@ -11,6 +11,7 @@
 
 #include <errno.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -867,7 +868,7 @@ static int estimateFrameIndex(TlavDecoder* dec, int64_t* outIndex)
 	return 0;
 }
 
-static int convertFrame(TlavDecoder* dec)
+static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride)
 {
 	AVFrame* srcFrame = dec->frame;
 
@@ -894,15 +895,23 @@ static int convertFrame(TlavDecoder* dec)
 		return 0;
 	}
 
-	int needed = width * height * 4;
-	if (!dec->rgba || dec->rgba_size < needed) {
-		uint8_t* next = (uint8_t*)realloc(dec->rgba, (size_t)needed);
-		if (!next) {
-			setError("Could not allocate %d bytes for RGBA frame", needed);
-			return 0;
+	if (!dstBuffer) {
+		int needed = width * height * 4;
+		if (!dec->rgba || dec->rgba_size < needed) {
+			uint8_t* next = (uint8_t*)realloc(dec->rgba, (size_t)needed);
+			if (!next) {
+				setError("Could not allocate %d bytes for RGBA frame", needed);
+				return 0;
+			}
+			dec->rgba = next;
+			dec->rgba_size = needed;
 		}
-		dec->rgba = next;
-		dec->rgba_size = needed;
+
+		dstBuffer = dec->rgba;
+		dstLineStride = width * 4;
+	} else if (dstLineStride == 0) {
+		setError("Destination stride is zero");
+		return 0;
 	}
 
 	if (!dec->sws || dec->width != width || dec->height != height || dec->sws_source_format != sourceFormat) {
@@ -924,8 +933,8 @@ static int convertFrame(TlavDecoder* dec)
 		copyString(dec->pixel_format, sizeof(dec->pixel_format), pixName ? pixName : "unknown");
 	}
 
-	uint8_t* dstData[4] = {dec->rgba, NULL, NULL, NULL};
-	int dstStride[4] = {width * 4, 0, 0, 0};
+	uint8_t* dstData[4] = {dstBuffer, NULL, NULL, NULL};
+	int dstStride[4] = {dstLineStride, 0, 0, 0};
 	int scaled = gApi.sws_scale(dec->sws, (const uint8_t* const*)srcFrame->data, srcFrame->linesize, 0, height, dstData, dstStride);
 	dec->last_scaled_rows = scaled;
 	if (scaled <= 0) {
@@ -937,8 +946,8 @@ static int convertFrame(TlavDecoder* dec)
 		return 0;
 	}
 
-	const uint8_t* firstRow = dec->rgba;
-	const uint8_t* lastRow = dec->rgba + ((height - 1) * dstStride[0]);
+	const uint8_t* firstRow = dstBuffer;
+	const uint8_t* lastRow = dstBuffer + ((height - 1) * dstStride[0]);
 	dec->first_row_alpha_min = 255;
 	dec->first_row_alpha_max = 0;
 	dec->first_row_alpha_zero_count = 0;
@@ -967,6 +976,11 @@ static int convertFrame(TlavDecoder* dec)
 	return 1;
 }
 
+static int convertFrame(TlavDecoder* dec)
+{
+	return convertFrameToBuffer(dec, NULL, 0);
+}
+
 static unsigned int sampleFrameBytes(TlavDecoder* dec)
 {
 	if (!dec || !dec->rgba || dec->rgba_size <= 0) {
@@ -980,6 +994,32 @@ static unsigned int sampleFrameBytes(TlavDecoder* dec)
 	}
 
 	return sample;
+}
+
+static void invalidateRgbaCache(TlavDecoder* dec)
+{
+	if (!dec || !dec->rgba) {
+		return;
+	}
+
+	free(dec->rgba);
+	dec->rgba = NULL;
+	dec->rgba_size = 0;
+}
+
+static int copyRgbaCacheToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride)
+{
+	if (!dec || !dec->rgba || !dstBuffer || dec->width <= 0 || dec->height <= 0) {
+		setError("No cached RGBA frame available");
+		return 0;
+	}
+
+	int rowBytes = dec->width * 4;
+	for (int y = 0; y < dec->height; y++) {
+		memcpy(dstBuffer + ((ptrdiff_t)y * dstLineStride), dec->rgba + ((ptrdiff_t)y * rowBytes), (size_t)rowBytes);
+	}
+
+	return 1;
 }
 
 TLAV_EXPORT void tlav_set_library_dir(const char* dir)
@@ -998,7 +1038,7 @@ TLAV_EXPORT const char* tlav_version(void)
 	}
 
 	static char version[128];
-	snprintf(version, sizeof(version), "bridge 1.1.0, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
+	snprintf(version, sizeof(version), "bridge 1.2.0, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
 	version[sizeof(version) - 1] = '\0';
 	unlockMutex();
 	return version;
@@ -1231,7 +1271,7 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 	}
 
 	int didSeek = 0;
-	if (frameIndex < dec->current_frame || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
+	if (frameIndex < dec->current_frame || (!dec->rgba && frameIndex == dec->current_frame) || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
 		if (!seekDecoder(dec, frameIndex)) {
 			setDebug("decode seek-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
 				(long long)requestedFrame,
@@ -1339,6 +1379,178 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 			dec->last_row_sample,
 			(void*)outFrame->data,
 			sampleFrameBytes(dec));
+		unlockMutex();
+		return 1;
+	}
+}
+
+TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame)
+{
+	lockMutex();
+	clearError();
+
+	TlavDecoder* dec = (TlavDecoder*)handle;
+	int64_t requestedFrame = frameIndex;
+	int64_t currentBefore = dec ? dec->current_frame : -999999;
+	if (!dec || !outFrame || !dstBuffer || dstLineStride == 0) {
+		setError("Direct decode called with invalid handle or destination");
+		setDebug("decode-into failed invalid-args requested=%lld dst=%p stride=%d", (long long)requestedFrame, (void*)dstBuffer, dstLineStride);
+		unlockMutex();
+		return 0;
+	}
+
+	if (frameIndex < 0) {
+		frameIndex = 0;
+	}
+	if (dec->frame_count > 0 && frameIndex >= dec->frame_count) {
+		frameIndex = dec->frame_count - 1;
+	}
+
+	if (dec->rgba && frameIndex == dec->current_frame) {
+		if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
+			setDebug("decode-into cache-copy-failed requested=%lld clamped=%lld error=%s", (long long)requestedFrame, (long long)frameIndex, gLastError);
+			unlockMutex();
+			return 0;
+		}
+
+		outFrame->data = dstBuffer;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dstLineStride;
+		outFrame->frame_index = dec->current_frame;
+		setDebug("decode-into cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d dst=%p sample=%u",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height,
+			outFrame->stride,
+			(void*)dstBuffer,
+			sampleFrameBytes(dec));
+		unlockMutex();
+		return 1;
+	}
+
+	int didSeek = 0;
+	if (frameIndex < dec->current_frame || (!dec->rgba && frameIndex == dec->current_frame) || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
+		if (!seekDecoder(dec, frameIndex)) {
+			setDebug("decode-into seek-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				gLastError);
+			unlockMutex();
+			return 0;
+		}
+		didSeek = 1;
+	}
+
+	int skippedFrames = 0;
+	while (1) {
+		if (!receiveNextFrame(dec)) {
+			if (dec->rgba) {
+				if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
+					setDebug("decode-into eof-cache-copy-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+						(long long)requestedFrame,
+						(long long)frameIndex,
+						(long long)currentBefore,
+						gLastError);
+					unlockMutex();
+					return 0;
+				}
+
+				outFrame->data = dstBuffer;
+				outFrame->width = dec->width;
+				outFrame->height = dec->height;
+				outFrame->stride = dstLineStride;
+				outFrame->frame_index = dec->current_frame;
+				setDebug("decode-into eof-return-cache requested=%lld clamped=%lld currentBefore=%lld returned=%lld seek=%d skipped=%d size=%dx%d stride=%d dst=%p sample=%u",
+					(long long)requestedFrame,
+					(long long)frameIndex,
+					(long long)currentBefore,
+					(long long)outFrame->frame_index,
+					didSeek,
+					skippedFrames,
+					outFrame->width,
+					outFrame->height,
+					outFrame->stride,
+					(void*)dstBuffer,
+					sampleFrameBytes(dec));
+				unlockMutex();
+				return 1;
+			}
+
+			if (gLastError[0] == '\0') {
+				setError("No decoded frame available");
+			}
+			setDebug("decode-into failed-no-frame requested=%lld clamped=%lld currentBefore=%lld seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockMutex();
+			return 0;
+		}
+
+		int64_t decodedIndex = 0;
+		int hasTimestampIndex = estimateFrameIndex(dec, &decodedIndex);
+		if (hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+		if (!hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+
+		if (!convertFrameToBuffer(dec, dstBuffer, dstLineStride)) {
+			setDebug("decode-into convert-failed requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				(long long)decodedIndex,
+				hasTimestampIndex,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockMutex();
+			return 0;
+		}
+
+		invalidateRgbaCache(dec);
+		dec->current_frame = frameIndex;
+		outFrame->data = dstBuffer;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dstLineStride;
+		outFrame->frame_index = frameIndex;
+		setDebug("decode-into converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d stride=%d swsRows=%d firstA=%d-%d firstA0=%d lastA=%d-%d lastA0=%d firstRowSample=%u lastRowSample=%u dst=%p",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)decodedIndex,
+			hasTimestampIndex,
+			didSeek,
+			skippedFrames,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height,
+			outFrame->stride,
+			dec->last_scaled_rows,
+			dec->first_row_alpha_min,
+			dec->first_row_alpha_max,
+			dec->first_row_alpha_zero_count,
+			dec->last_row_alpha_min,
+			dec->last_row_alpha_max,
+			dec->last_row_alpha_zero_count,
+			dec->first_row_sample,
+			dec->last_row_sample,
+			(void*)dstBuffer);
 		unlockMutex();
 		return 1;
 	}
