@@ -26,6 +26,8 @@ if defined TLAV_OUT_DIR (
 ) else (
 	set "out_dir=%script_dir%windows_x86_64"
 )
+rem Build ID embedded in the binary so every CI run produces unique output.
+if not defined TLAV_BUILD_ID set "TLAV_BUILD_ID=dev"
 
 if not defined FFMPEG_DIR (
 	echo error: set FFMPEG_DIR to your FFmpeg dev folder ^(must contain include\^)
@@ -46,8 +48,9 @@ if not exist "%out_dir%" mkdir "%out_dir%"
 
 set "out_path=%out_dir%\libav_bridge.dll"
 
-cl /nologo /O2 /MD /W3 /TC /std:c11 /Brepro ^
+cl /nologo /O2 /MD /W3 /TC /std:c11 ^
 	/I"%FFMPEG_DIR%\include" ^
+	/D TLAV_BUILD_ID="%TLAV_BUILD_ID%" ^
 	/LD "%script_dir%libav_bridge.c" ^
 	/Fo:"%out_dir%\libav_bridge.obj" ^
 	/Fe:"%out_path%"

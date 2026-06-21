@@ -37,6 +37,11 @@
 #define PATH_MAX 4096
 #endif
 
+/* Build identifier injected by CI so every run produces a unique binary. */
+#ifndef TLAV_BUILD_ID
+#define TLAV_BUILD_ID "dev"
+#endif
+
 /* Export the public ABI. On Windows nothing is exported from a DLL by default;
  * elsewhere symbols already default to visible, so this is a no-op. */
 #ifdef _WIN32
@@ -1205,8 +1210,10 @@ TLAV_EXPORT const char* tlav_version(void)
 		return "bridge loaded, libav unavailable";
 	}
 
-	static TLAV_THREAD_LOCAL char version[128];
-	snprintf(version, sizeof(version), "bridge 1.3.0, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
+	static TLAV_THREAD_LOCAL char version[192];
+	snprintf(version, sizeof(version), "bridge 1.3.0 (build %s), libav %s",
+		TLAV_BUILD_ID,
+		gApi.av_version_info ? gApi.av_version_info() : "unknown");
 	version[sizeof(version) - 1] = '\0';
 	unlockMutex();
 	return version;

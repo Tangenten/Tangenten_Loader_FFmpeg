@@ -22,6 +22,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Output path — override via TLAV_OUT_DIR_TEMPLATE env var.
 # TLAV_OUT_DIR_TEMPLATE uses %a as the arch placeholder (e.g. mac_%a -> mac_x86_64).
 : "${TLAV_OUT_DIR_TEMPLATE:=$script_dir/mac_%a}"
+# Build ID embedded in the binary so every CI run produces unique output.
+: "${TLAV_BUILD_ID:=dev}"
 
 if ! command -v pkg-config >/dev/null 2>&1; then
 	echo "error: pkg-config not found (try: brew install pkg-config ffmpeg)" >&2
@@ -38,6 +40,7 @@ build_arch() {
 
 	cc -O2 -fPIC -dynamiclib -arch "$arch" -Wall -Wextra \
 		$cflags \
+		-DTLAV_BUILD_ID=\"$TLAV_BUILD_ID\" \
 		"$script_dir/libav_bridge.c" \
 		-o "$out_path"
 

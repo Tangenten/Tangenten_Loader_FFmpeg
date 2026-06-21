@@ -9,6 +9,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Output path — override via TLAV_OUT_DIR env var.
 : "${TLAV_OUT_DIR:=$script_dir/linux_x86_64}"
+# Build ID embedded in the binary so every CI run produces unique output.
+: "${TLAV_BUILD_ID:=dev}"
 
 out_dir="$TLAV_OUT_DIR"
 out_path="$out_dir/libav_bridge.so"
@@ -16,6 +18,7 @@ mkdir -p "$out_dir"
 
 cc -O2 -fPIC -shared -Wall -Wextra \
   $(pkg-config --cflags libavformat libavcodec libavutil libswscale 2>/dev/null || true) \
+  -DTLAV_BUILD_ID=\"$TLAV_BUILD_ID\" \
   "$script_dir/libav_bridge.c" \
   -o "$out_path" \
   -ldl -lpthread
