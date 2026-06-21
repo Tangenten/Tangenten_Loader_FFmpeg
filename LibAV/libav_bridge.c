@@ -74,6 +74,12 @@ typedef struct TlavApi {
 	int (*av_strerror)(int errnum, char* errbuf, size_t errbuf_size);
 	const char* (*av_get_pix_fmt_name)(enum AVPixelFormat pix_fmt);
 
+	/* Runtime soname-major reporters, used to reject ABI-incompatible libs. */
+	unsigned (*avutil_version)(void);
+	unsigned (*avcodec_version)(void);
+	unsigned (*avformat_version)(void);
+	unsigned (*swscale_version)(void);
+
 	int (*avformat_open_input)(AVFormatContext** ps, const char* url, const AVInputFormat* fmt, AVDictionary** options);
 	int (*avformat_find_stream_info)(AVFormatContext* ic, AVDictionary** options);
 	void (*avformat_close_input)(AVFormatContext** s);
@@ -266,6 +272,21 @@ static void joinPath(char* dst, size_t dstSize, const char* dir, const char* fil
 	if (ret < 0 || (size_t)ret >= dstSize) dst[dstSize - 1] = '\0';
 }
 
+/* Build the exact runtime file name for a libav major version using the
+ * platform's soname convention: lib<root>.so.<major> / lib<root>.<major>.dylib
+ * / <root>-<major>.dll. Used to prefer the major this bridge was built against. */
+static void exactLibName(char* dst, size_t dstSize, const char* libRoot, int major)
+{
+#ifdef _WIN32
+	snprintf(dst, dstSize, "%s-%d.dll", libRoot, major);
+#elif defined(__APPLE__)
+	snprintf(dst, dstSize, "lib%s.%d.dylib", libRoot, major);
+#else
+	snprintf(dst, dstSize, "lib%s.so.%d", libRoot, major);
+#endif
+	dst[dstSize - 1] = '\0';
+}
+
 static void* loadSharedObject(const char* path)
 {
 #ifdef _WIN32
@@ -390,13 +411,23 @@ static int scanLibraries(const char* lib, struct LibEntry* entries, int max)
 	return count;
 }
 
-/* Try to load a library, preferring discovered files over the static fallback. */
-static void* loadLibrary(const char* label, const char* libRoot, const char* const* fallback)
+/* Try to load a library, preferring the exact major this bridge was built
+ * against, then the highest discovered file, then the static fallback. */
+static void* loadLibrary(const char* label, const char* libRoot, int preferredMajor, const char* const* fallback)
 {
+	char path[PATH_MAX];
+
+	if (preferredMajor > 0) {
+		char exact[64];
+		exactLibName(exact, sizeof(exact), libRoot, preferredMajor);
+		joinPath(path, sizeof(path), gLibraryDir, exact);
+		void* handle = loadSharedObject(path);
+		if (handle) return handle;
+	}
+
 	struct LibEntry entries[32];
 	int n = scanLibraries(libRoot, entries, 32);
 	if (n > 0) {
-		char path[PATH_MAX];
 		for (int i = 0; i < n; i++) {
 			joinPath(path, sizeof(path), gLibraryDir, entries[i].name);
 			void* handle = loadSharedObject(path);
@@ -405,7 +436,6 @@ static void* loadLibrary(const char* label, const char* libRoot, const char* con
 	}
 	/* Static fallback. */
 	if (fallback) {
-		char path[PATH_MAX];
 		for (int i = 0; fallback[i] != NULL; i++) {
 			joinPath(path, sizeof(path), gLibraryDir, fallback[i]);
 			void* handle = loadSharedObject(path);
@@ -442,6 +472,80 @@ static void loadOptionalSymbol(void* handle, const char* symbolName, void** dst)
 #define LOAD_OPTIONAL(handle, name) \
 	loadOptionalSymbol((handle), #name, (void**)&gApi.name)
 
+/* libav packs the soname major into the high 8 bits of the version word. */
+static int avMajor(unsigned version)
+{
+	return (int)((version >> 16) & 0xff);
+}
+
+/* Map a libavcodec soname major to its FFmpeg release for human-readable errors. */
+static int ffmpegReleaseFromAvcodecMajor(int avcodecMajor)
+{
+	switch (avcodecMajor) {
+		case 62: return 8;
+		case 61: return 7;
+		case 60: return 6;
+		case 59: return 5;
+		case 58: return 4;
+		default: return 0;
+	}
+}
+
+/*
+ * The bridge reads libav structs (AVCodecContext, AVFrame, ...) by field, so it
+ * is only ABI-compatible with the FFmpeg major it was compiled against. The
+ * loader will happily open a different major, which then reads fields at the
+ * wrong offsets (garbage sizes, failed decodes). Reject any major mismatch here
+ * with an actionable message instead of corrupting output downstream.
+ */
+static int checkLibavVersions(void)
+{
+	struct VersionCheck {
+		const char* name;
+		unsigned (*fn)(void);
+		int expected;
+	} checks[4] = {
+		{"libavutil", gApi.avutil_version, LIBAVUTIL_VERSION_MAJOR},
+		{"libavcodec", gApi.avcodec_version, LIBAVCODEC_VERSION_MAJOR},
+		{"libavformat", gApi.avformat_version, LIBAVFORMAT_VERSION_MAJOR},
+		{"libswscale", gApi.swscale_version, LIBSWSCALE_VERSION_MAJOR},
+	};
+
+	char detail[512];
+	size_t off = 0;
+	int bad = 0;
+	for (int i = 0; i < 4; i++) {
+		int got = checks[i].fn ? avMajor(checks[i].fn()) : -1;
+		if (got == checks[i].expected) {
+			continue;
+		}
+		bad++;
+		int written = snprintf(detail + off, sizeof(detail) - off, "%s%s major %d (need %d)",
+			off ? ", " : "", checks[i].name, got, checks[i].expected);
+		if (written < 0) break;
+		off += (size_t)written;
+		if (off >= sizeof(detail)) { off = sizeof(detail) - 1; break; }
+	}
+
+	if (bad) {
+		int release = ffmpegReleaseFromAvcodecMajor(LIBAVCODEC_VERSION_MAJOR);
+		if (release > 0) {
+			setError("FFmpeg ABI mismatch: %s. This bridge needs FFmpeg %d.x runtime libraries; copy matching libav*/libsw* files into %s.",
+				detail, release, gLibraryDir);
+		} else {
+			setError("FFmpeg ABI mismatch: %s. Copy runtime libraries matching this bridge build into %s.",
+				detail, gLibraryDir);
+		}
+		setDebug("version-mismatch %s", detail);
+		return 0;
+	}
+
+	setDebug("version-ok avutil=%d avcodec=%d avformat=%d swscale=%d",
+		avMajor(gApi.avutil_version()), avMajor(gApi.avcodec_version()),
+		avMajor(gApi.avformat_version()), avMajor(gApi.swscale_version()));
+	return 1;
+}
+
 static int loadApi(void)
 {
 	if (gApiLoaded) {
@@ -474,16 +578,25 @@ static int loadApi(void)
 #endif
 
 	memset(&gApi, 0, sizeof(gApi));
-	gApi.avutil = loadLibrary("libavutil", "avutil", avutilNames);
+	gApi.avutil = loadLibrary("libavutil", "avutil", LIBAVUTIL_VERSION_MAJOR, avutilNames);
 	if (!gApi.avutil) return 0;
-	gApi.swresample = loadLibrary("libswresample", "swresample", swresampleNames);
+	gApi.swresample = loadLibrary("libswresample", "swresample", 0, swresampleNames);
 	if (!gApi.swresample) return 0;
-	gApi.avcodec = loadLibrary("libavcodec", "avcodec", avcodecNames);
+	gApi.avcodec = loadLibrary("libavcodec", "avcodec", LIBAVCODEC_VERSION_MAJOR, avcodecNames);
 	if (!gApi.avcodec) return 0;
-	gApi.avformat = loadLibrary("libavformat", "avformat", avformatNames);
+	gApi.avformat = loadLibrary("libavformat", "avformat", LIBAVFORMAT_VERSION_MAJOR, avformatNames);
 	if (!gApi.avformat) return 0;
-	gApi.swscale = loadLibrary("libswscale", "swscale", swscaleNames);
+	gApi.swscale = loadLibrary("libswscale", "swscale", LIBSWSCALE_VERSION_MAJOR, swscaleNames);
 	if (!gApi.swscale) return 0;
+
+	/* Reject ABI-incompatible majors before any struct field is read. */
+	LOAD_SYMBOL(gApi.avutil, avutil_version);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_version);
+	LOAD_SYMBOL(gApi.avformat, avformat_version);
+	LOAD_SYMBOL(gApi.swscale, swscale_version);
+	if (!checkLibavVersions()) {
+		return 0;
+	}
 
 	LOAD_SYMBOL(gApi.avutil, av_version_info);
 	LOAD_SYMBOL(gApi.avutil, av_strerror);
