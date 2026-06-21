@@ -314,8 +314,17 @@ end
 
 local function loadLibAV()
 	if LOADER_LIBAV then
-		logInfo("[libav] Reusing loaded bridge", LOADER_LIBAV.version(), "path", LOADER_LIBAV.bridgePath or "<unknown>")
-		return LOADER_LIBAV
+		local ok, version = pcall(function()
+			return LOADER_LIBAV.version()
+		end)
+		if ok then
+			logInfo("[libav] Reusing loaded bridge", version, "path", LOADER_LIBAV.bridgePath or "<unknown>")
+			return LOADER_LIBAV
+		end
+
+		logInfo("[libav] Cached bridge is invalid; rebuilding", tostring(version))
+		LOADER_LIBAV = nil
+		closeDecoder()
 	end
 	if LOADER_LIBAV_ERROR then
 		logInfo("[libav] Returning cached bridge error", LOADER_LIBAV_ERROR)
@@ -341,7 +350,17 @@ local function loadLibAV()
 	end
 
 	LOADER_LIBAV = libAV
-	logInfo("[libav] Loaded", libAV.version(), "dir", libAV.libDir or "<unknown>", "bridge", libAV.bridgePath or "<unknown>")
+	local versionOk, version = pcall(function()
+		return libAV.version()
+	end)
+	if not versionOk then
+		LOADER_LIBAV = nil
+		LOADER_LIBAV_ERROR = "LibAV bridge loaded but version check failed: " .. tostring(version)
+		logInfo("[libav] Bridge version check failed", LOADER_LIBAV_ERROR)
+		return nil, LOADER_LIBAV_ERROR
+	end
+
+	logInfo("[libav] Loaded", version, "dir", libAV.libDir or "<unknown>", "bridge", libAV.bridgePath or "<unknown>")
 	return LOADER_LIBAV
 end
 

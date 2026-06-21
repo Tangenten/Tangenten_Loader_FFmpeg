@@ -156,17 +156,26 @@ local function build(fuseDir)
 	module.libDir = libDir
 	module.bridgePath = bridgePath
 	module.bridgeName = bridgeName
+
+	local function loadedC()
+		if module.C == nil then
+			error("LibAV bridge handle is not loaded", 2)
+		end
+
+		return module.C
+	end
+
 	local lastDebugFn
 	local hasLastDebug = pcall(function()
-		lastDebugFn = C.tlav_last_debug
+		lastDebugFn = loadedC().tlav_last_debug
 	end)
 
 	function module.version()
-		return ffiString(C.tlav_version())
+		return ffiString(loadedC().tlav_version())
 	end
 
 	function module.lastError()
-		return ffiString(C.tlav_last_error())
+		return ffiString(loadedC().tlav_last_error())
 	end
 
 	if hasLastDebug and lastDebugFn then
@@ -181,25 +190,25 @@ local function build(fuseDir)
 
 	function module.open(path)
 		local info = ffi.new("TlavInfo")
-		local handle = C.tlav_open(path, info)
+		local handle = loadedC().tlav_open(path, info)
 		if handle == nil or handle == ffi.NULL then
 			return nil, module.lastError()
 		end
 
 		local decoder = {
-			handle = ffi.gc(handle, C.tlav_close),
+			handle = ffi.gc(handle, loadedC().tlav_close),
 			info = infoToTable(info),
 		}
 
 		-- Additive export; tolerate an older bridge/cdef that lacks it.
 		local hwOk, hwName = pcall(function()
-			return ffiString(C.tlav_hw_accel(handle))
+			return ffiString(loadedC().tlav_hw_accel(handle))
 		end)
 		decoder.info.hwAccel = (hwOk and hwName) or ""
 
 		function decoder:decode(frameIndex)
 			local frame = ffi.new("TlavFrame")
-			local ok = C.tlav_decode(self.handle, frameIndex, frame)
+			local ok = loadedC().tlav_decode(self.handle, frameIndex, frame)
 			if ok == 0 then
 				return nil, module.lastError()
 			end
@@ -210,7 +219,7 @@ local function build(fuseDir)
 		function decoder:close()
 			if self.handle ~= nil and self.handle ~= ffi.NULL then
 				ffi.gc(self.handle, nil)
-				C.tlav_close(self.handle)
+				loadedC().tlav_close(self.handle)
 				self.handle = nil
 			end
 		end
