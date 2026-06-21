@@ -119,7 +119,7 @@ jobs:
         with:
           path: artifacts
 
-      - name: Place binaries into repo
+      - name: Place binaries and commit
         run: |
           mkdir -p LibAV/linux_x86_64 LibAV/mac_x86_64 LibAV/mac_arm64 LibAV/windows_x86_64
           cp artifacts/libav-bridge-linux-x86_64/*.so* LibAV/linux_x86_64/ 2>/dev/null || true
@@ -127,14 +127,15 @@ jobs:
           cp artifacts/libav-bridge-macos-arm64/*.dylib LibAV/mac_arm64/ 2>/dev/null || true
           cp artifacts/libav-bridge-windows-x86_64/*.dll LibAV/windows_x86_64/ 2>/dev/null || true
 
-      - name: Commit and push
-        run: |
+          # Always write a build info file so every CI run produces a unique
+          # commit regardless of compiler determinism.
+          echo "build_id=${{ github.run_id }}"   > LibAV/build_info.txt
+          echo "run_number=${{ github.run_number }}" >> LibAV/build_info.txt
+          echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> LibAV/build_info.txt
+          echo "sha=${{ github.sha }}"          >> LibAV/build_info.txt
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f LibAV/*/libav_bridge.*
-          if git diff --cached --quiet; then
-            echo "no changes to commit"
-          else
-            git commit -m "update bridge binaries [skip ci]"
-            git push
-          fi
+          git add -f LibAV/*/libav_bridge.* LibAV/build_info.txt
+          git commit -m "update bridge binaries [skip ci]"
+          git push

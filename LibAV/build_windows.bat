@@ -46,7 +46,7 @@ if not exist "%out_dir%" mkdir "%out_dir%"
 
 set "out_path=%out_dir%\libav_bridge.dll"
 
-cl /nologo /O2 /MD /W3 /TC /std:c11 ^
+cl /nologo /O2 /MD /W3 /TC /std:c11 /Brepro ^
 	/I"%FFMPEG_DIR%\include" ^
 	/LD "%script_dir%libav_bridge.c" ^
 	/Fo:"%out_dir%\libav_bridge.obj" ^
