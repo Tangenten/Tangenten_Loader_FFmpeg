@@ -165,6 +165,7 @@ static int gApiLoaded = 0;
 static char gLibraryDir[PATH_MAX] = {0};
 static char gLastError[1024] = {0};
 static char gLastDebug[2048] = {0};
+static char gLastLoadError[1024] = {0};
 
 #ifdef _WIN32
 static CRITICAL_SECTION gMutex;
@@ -205,6 +206,27 @@ static void setError(const char* fmt, ...)
 static void clearError(void)
 {
 	gLastError[0] = '\0';
+}
+
+static void setLoadError(const char* path)
+{
+#ifdef _WIN32
+	DWORD err = GetLastError();
+	char msg[768] = {0};
+	FormatMessageA(
+		FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL,
+		err,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		msg,
+		(DWORD)sizeof(msg),
+		NULL);
+	snprintf(gLastLoadError, sizeof(gLastLoadError), "%s: %s", path, msg[0] ? msg : "unknown loader error");
+#else
+	const char* err = dlerror();
+	snprintf(gLastLoadError, sizeof(gLastLoadError), "%s: %s", path, err ? err : "unknown loader error");
+#endif
+	gLastLoadError[sizeof(gLastLoadError) - 1] = '\0';
 }
 
 static void setDebug(const char* fmt, ...)
@@ -303,9 +325,27 @@ static void plainLibName(char* dst, size_t dstSize, const char* libRoot)
 static void* loadSharedObject(const char* path)
 {
 #ifdef _WIN32
-	return (void*)LoadLibraryA(path);
+	void* handle = (void*)LoadLibraryA(path);
 #else
-	return dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+	dlerror();
+	void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+#endif
+	if (!handle) {
+		setLoadError(path);
+	}
+	return handle;
+}
+
+static void unloadSharedObject(void* handle)
+{
+	if (!handle) {
+		return;
+	}
+
+#ifdef _WIN32
+	FreeLibrary((HMODULE)handle);
+#else
+	dlclose(handle);
 #endif
 }
 
@@ -327,8 +367,8 @@ static int dllVersion(const char* name)
 	const char* dot = strrchr(name, '.');
 	if (!dot) return -1;
 	const char* dash = NULL;
-	for (const char* p = dot - 1; p >= name; p--) {
-		if (*p == '-') { dash = p; break; }
+	for (const char* p = name; p < dot; p++) {
+		if (*p == '-') dash = p;
 	}
 	if (!dash) return -1;
 	return atoi(dash + 1);
@@ -342,15 +382,12 @@ static int matchLibrary(const char* name, const char* lib) {
 /* Extract version from "libavutil.<major>.dylib", or -1. */
 static int dylibVersion(const char* name)
 {
-	const char* dot = strrchr(name, '.');
-	if (!dot) return -1;
-	const char* prevDot = NULL;
-	for (const char* p = dot - 1; p >= name; p--) {
-		if (*p == '.') { prevDot = p; break; }
-	}
+	const char* prevDot = strchr(name, '.');
 	if (!prevDot) return -1;
 	char buf[32];
-	size_t len = (size_t)(dot - prevDot - 1);
+	const char* end = strchr(prevDot + 1, '.');
+	if (!end) return -1;
+	size_t len = (size_t)(end - prevDot - 1);
 	if (len >= sizeof(buf)) return -1;
 	memcpy(buf, prevDot + 1, len);
 	buf[len] = '\0';
@@ -366,9 +403,9 @@ static int matchLibrary(const char* name, const char* lib) {
 /* Extract version from "libavutil.so.<major>", or -1. */
 static int soVersion(const char* name)
 {
-	const char* dot = strrchr(name, '.');
-	if (!dot) return -1;
-	int v = atoi(dot + 1);
+	const char* marker = strstr(name, ".so.");
+	if (!marker) return -1;
+	int v = atoi(marker + 4);
 	return v > 0 ? v : -1;
 }
 static int matchLibrary(const char* name, const char* lib) {
@@ -429,6 +466,7 @@ static int scanLibraries(const char* lib, struct LibEntry* entries, int max)
 static void* loadLibrary(const char* label, const char* libRoot, int preferredMajor)
 {
 	char path[PATH_MAX];
+	gLastLoadError[0] = '\0';
 
 	if (preferredMajor > 0) {
 		char exact[64];
@@ -453,8 +491,24 @@ static void* loadLibrary(const char* label, const char* libRoot, int preferredMa
 	void* handle = loadSharedObject(path);
 	if (handle) return handle;
 
-	setError("Missing %s in %s", label, gLibraryDir);
+	if (gLastLoadError[0] != '\0') {
+		setError("Missing %s in %s. Last loader error: %s", label, gLibraryDir, gLastLoadError);
+	} else {
+		setError("Missing %s in %s", label, gLibraryDir);
+	}
 	return NULL;
+}
+
+static int failLoadApi(void)
+{
+	unloadSharedObject(gApi.swscale);
+	unloadSharedObject(gApi.avformat);
+	unloadSharedObject(gApi.avcodec);
+	unloadSharedObject(gApi.swresample);
+	unloadSharedObject(gApi.avutil);
+	memset(&gApi, 0, sizeof(gApi));
+	gApiLoaded = 0;
+	return 0;
 }
 
 static int loadRequiredSymbol(void* handle, const char* symbolName, void** dst)
@@ -471,7 +525,7 @@ static int loadRequiredSymbol(void* handle, const char* symbolName, void** dst)
 #define LOAD_SYMBOL(handle, name) \
 	do { \
 		if (!loadRequiredSymbol((handle), #name, (void**)&gApi.name)) { \
-			return 0; \
+			return failLoadApi(); \
 		} \
 	} while (0)
 
@@ -570,15 +624,15 @@ static int loadApi(void)
 
 	memset(&gApi, 0, sizeof(gApi));
 	gApi.avutil = loadLibrary("libavutil", "avutil", LIBAVUTIL_VERSION_MAJOR);
-	if (!gApi.avutil) return 0;
+	if (!gApi.avutil) return failLoadApi();
 	gApi.swresample = loadLibrary("libswresample", "swresample", 0);
-	if (!gApi.swresample) return 0;
+	if (!gApi.swresample) return failLoadApi();
 	gApi.avcodec = loadLibrary("libavcodec", "avcodec", LIBAVCODEC_VERSION_MAJOR);
-	if (!gApi.avcodec) return 0;
+	if (!gApi.avcodec) return failLoadApi();
 	gApi.avformat = loadLibrary("libavformat", "avformat", LIBAVFORMAT_VERSION_MAJOR);
-	if (!gApi.avformat) return 0;
+	if (!gApi.avformat) return failLoadApi();
 	gApi.swscale = loadLibrary("libswscale", "swscale", LIBSWSCALE_VERSION_MAJOR);
-	if (!gApi.swscale) return 0;
+	if (!gApi.swscale) return failLoadApi();
 
 	/* Reject ABI-incompatible majors before any struct field is read. */
 	LOAD_SYMBOL(gApi.avutil, avutil_version);
@@ -586,7 +640,7 @@ static int loadApi(void)
 	LOAD_SYMBOL(gApi.avformat, avformat_version);
 	LOAD_SYMBOL(gApi.swscale, swscale_version);
 	if (!checkLibavVersions()) {
-		return 0;
+		return failLoadApi();
 	}
 
 	LOAD_SYMBOL(gApi.avutil, av_version_info);

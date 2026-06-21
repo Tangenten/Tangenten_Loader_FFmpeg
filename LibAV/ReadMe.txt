@@ -66,3 +66,11 @@ against, then scans the platform folder for matching libav files and tries the
 highest discovered version, then tries the unversioned runtime name
 (libavcodec.so, libavcodec.dylib, avcodec.dll, ...). The major it loads must
 still match the bridge's build headers.
+
+Failure notes
+-------------
+
+If a runtime library is missing, the status message includes the last native
+loader error for the path it tried. If you copy the missing files into the
+platform folder, the bridge unloads partial handles from the failed attempt and
+can retry without restarting Fusion.
