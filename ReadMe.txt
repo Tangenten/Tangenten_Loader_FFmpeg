@@ -9,7 +9,6 @@ Install
 -------
 
 Copy this folder into your Fusion Fuses directory:
-
   Tangenten_Loader_FFmpeg/
 
 The repo includes pre-built bridge binaries for all platforms in
