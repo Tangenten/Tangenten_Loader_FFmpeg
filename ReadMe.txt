@@ -37,3 +37,6 @@ In short:
 - The Lua scripts (Loader_FFmpeg.fuse, LibAV_FFI.lua) never touch FFmpeg
   directly; they are independent LGPL software.
 
+---
+Repository: https://github.com/Tangenten/Tangenten_Loader_FFmpeg
+
