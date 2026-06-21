@@ -431,9 +431,20 @@ local function setStatusHtml(html)
 	InMetadataStatus:SetAttrs({ LINKS_Name = html })
 end
 
-local function setInfoStatus(info, path)
+local function libAVVersion()
+	if not LOADER_LIBAV or not LOADER_LIBAV.version then return "not loaded" end
+
+	local ok, version = pcall(function()
+		return LOADER_LIBAV.version()
+	end)
+	if not ok then return "unavailable: " .. tostring(version) end
+
+	return version
+end
+
+local function setInfoStatus(info, path, runtime)
 	local frameCount = getInfoFrameCount(info)
-	setStatusHtml(makeStatusHtml("Video loaded", {
+	local lines = {
 		string.format("Path: %s", path),
 		string.format("Resolution: %d x %d", info.width or 0, info.height or 0),
 		string.format("Frame rate: %s", formatFps(info.fps)),
@@ -442,7 +453,39 @@ local function setInfoStatus(info, path)
 		string.format("Codec: %s", info.codecName ~= "" and info.codecName or "unknown"),
 		string.format("Pixel format: %s", info.pixelFormat ~= "" and info.pixelFormat or "unknown"),
 		string.format("Decoding: %s", (info.hwAccel and info.hwAccel ~= "") and ("Hardware (" .. string.upper(info.hwAccel) .. ")") or "Software"),
-	}, false))
+	}
+
+	if runtime then
+		lines[#lines + 1] = ""
+		lines[#lines + 1] = string.format("Runtime: %s", runtime.decodePath or "unknown")
+		lines[#lines + 1] = string.format("Bridge: %s", libAVVersion())
+		if LOADER_LIBAV and LOADER_LIBAV.bridgePath then
+			lines[#lines + 1] = string.format("Bridge path: %s", LOADER_LIBAV.bridgePath)
+		end
+		if runtime.frameIndex ~= nil then
+			lines[#lines + 1] = string.format("Requested frame: %s", tostring(runtime.frameIndex))
+		end
+		if runtime.reportedFrame ~= nil then
+			lines[#lines + 1] = string.format("Decoded frame: %s", tostring(runtime.reportedFrame))
+		end
+		if runtime.outputSize then
+			lines[#lines + 1] = string.format("Output: %s", runtime.outputSize)
+		end
+		if runtime.stride then
+			lines[#lines + 1] = string.format("Stride: %s", tostring(runtime.stride))
+		end
+		if runtime.fallbackReason and runtime.fallbackReason ~= "" then
+			lines[#lines + 1] = string.format("Fallback: %s", runtime.fallbackReason)
+		end
+		if LOADER_LIBAV and LOADER_LIBAV.lastDebug then
+			local debug = LOADER_LIBAV.lastDebug()
+			if debug and debug ~= "" then
+				lines[#lines + 1] = string.format("Bridge debug: %s", debug)
+			end
+		end
+	end
+
+	setStatusHtml(makeStatusHtml("Video loaded", lines, false))
 end
 
 local function setErrorStatus(title, detail)
@@ -1188,6 +1231,11 @@ function Process(req)
 	if blank then
 		logInfo("[process] Blank frame requested")
 		setBlankOutput(self, req, decoder.info.width, decoder.info.height)
+		setInfoStatus(decoder.info, mappedPath, {
+			decodePath = "Blank frame",
+			frameIndex = frameIndex,
+			outputSize = string.format("%d x %d", decoder.info.width or 0, decoder.info.height or 0),
+		})
 		return
 	end
 
@@ -1201,9 +1249,13 @@ function Process(req)
 
 	logInfo("[process] Direct decoding frame", frameIndex)
 	local frame, directErr = decodeFrameIntoImage(decoder, frameIndex, outImg)
+	local decodePath = "Direct to Fusion image"
+	local fallbackReason = nil
 	logInfo("[process] Direct decode result", "ok", frame ~= nil, "err", tostring(directErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
 	if not frame then
 		logInfo("[process] Falling back to buffered decode", tostring(directErr))
+		decodePath = "Buffered fallback"
+		fallbackReason = tostring(directErr or "")
 		frame = nil
 		local decodeErr
 		frame, decodeErr = decoder:decode(frameIndex)
@@ -1221,6 +1273,15 @@ function Process(req)
 			return
 		end
 	end
+
+	setInfoStatus(decoder.info, mappedPath, {
+		decodePath = decodePath,
+		frameIndex = frameIndex,
+		reportedFrame = tonumber(frame.frame_index),
+		outputSize = string.format("%d x %d", tonumber(frame.width) or 0, tonumber(frame.height) or 0),
+		stride = tonumber(frame.stride),
+		fallbackReason = fallbackReason,
+	})
 
 	logInfo("[process] Setting output", "time", req.Time, "frameIndex", frameIndex, "reportedFrame", tonumber(frame.frame_index), "width", tonumber(frame.width), "height", tonumber(frame.height))
 	OutImage:Set(req, outImg)
