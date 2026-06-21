@@ -247,6 +247,9 @@ local function computeFrameIndex(req, info, comp)
 	local endFrame = math.max(0, roundToInt(InEndFrame:GetValue(req).Value or 0))
 	local manualFrame = math.max(0, roundToInt(InManualFrame:GetValue(req).Value or 0))
 
+	-- End/FPS are seeded from the clip on load; the 0 fallbacks below are kept
+	-- only as a safety net for unseeded states (e.g. a comp opened with a path
+	-- already set), so a stray 0 means "whole clip" / "source rate", not frozen.
 	local startIdx = clamp(startFrame, 0, maxFrame)
 	local endIdx = endFrame == 0 and maxFrame or clamp(endFrame - 1, startIdx, maxFrame)
 	local subsetFrameCount = math.max(1, endIdx - startIdx + 1)
@@ -616,10 +619,10 @@ function Create()
 		{ CCS_AddString = "Manual" },
 	})
 
-	InPlaybackFPS = self:AddInput("Playback FPS (0 = Source)", "PlaybackFPS", {
+	InPlaybackFPS = self:AddInput("Playback FPS", "PlaybackFPS", {
 		LINKID_DataType = "Number",
 		INPID_InputControl = "SliderControl",
-		INP_Default = 0.0,
+		INP_Default = 24.0,
 		INP_MinScale = 0.0,
 		INP_MaxScale = 120.0,
 		IC_DisplayedPrecision = 3,
@@ -661,7 +664,7 @@ function Create()
 		IC_ControlPage = 0,
 	})
 
-	InEndFrame = self:AddInput("End Frame (0 = All)", "EndFrame", {
+	InEndFrame = self:AddInput("End Frame", "EndFrame", {
 		LINKID_DataType = "Number",
 		INPID_InputControl = "RangeControl",
 		IC_ControlGroup = 1,
