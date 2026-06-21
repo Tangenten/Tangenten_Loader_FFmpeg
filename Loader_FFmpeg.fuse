@@ -824,6 +824,52 @@ local function resetButton(input)
 	end
 end
 
+-- Read clip metadata with a throwaway decoder handle. This stays separate from
+-- the shared LOADER_DECODER (used by Process on another thread) so probing from
+-- the UI thread never races the render decoder.
+local function probeClipInfo(comp, rawPath)
+	local mapped = mapCompPath(comp, rawPath or "")
+	if mapped == "" or not fileExists(mapped) then
+		return nil, mapped
+	end
+
+	local libAV = loadLibAV()
+	if not libAV then return nil, mapped end
+
+	local probe, err = libAV.open(mapped)
+	if not probe then
+		logInfo("[defaults] Probe open failed", mapped, tostring(err))
+		return nil, mapped
+	end
+
+	local info = probe.info
+	probe:close()
+	return info, mapped
+end
+
+-- On a freshly loaded clip, seed Playback FPS and End Frame from the source so
+-- both the live value and the reset default match the clip, and grow the slider
+-- scales so the new values stay reachable.
+local function applyClipDefaults(info)
+	if not info or not Number then return end
+
+	local fps = (info.fps and info.fps > 0) and info.fps or nil
+	if fps and InPlaybackFPS then
+		InPlaybackFPS:SetAttrs({ INP_Default = fps, INP_MaxScale = math.max(fps, 120.0) })
+		InPlaybackFPS:SetSource(Number(fps), 0, 0)
+		logInfo("[defaults] PlaybackFPS", "value", fps)
+	end
+
+	local frameCount = getInfoFrameCount(info)
+	if frameCount > 0 and InEndFrame then
+		local maxScale = math.max(frameCount, 1)
+		if InStartFrame then InStartFrame:SetAttrs({ INP_MaxScale = maxScale }) end
+		InEndFrame:SetAttrs({ INP_Default = frameCount, INP_MaxScale = maxScale })
+		InEndFrame:SetSource(Number(frameCount), 0, 0)
+		logInfo("[defaults] EndFrame", "value", frameCount, "maxScale", maxScale)
+	end
+end
+
 function NotifyChanged(inp, param, time)
 	if not param then return end
 
@@ -836,7 +882,13 @@ function NotifyChanged(inp, param, time)
 
 	if inp == InInputPath then
 		closeDecoder()
-		setStatusHtml(makeStatusHtml("Video path changed", { "Render a frame to load metadata." }, false))
+		local info, mapped = probeClipInfo(self.Comp, param.Value)
+		if info then
+			applyClipDefaults(info)
+			setInfoStatus(info, mapped)
+		else
+			setStatusHtml(makeStatusHtml("Video path changed", { "Render a frame to load metadata." }, false))
+		end
 		return
 	end
 
