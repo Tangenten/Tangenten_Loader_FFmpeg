@@ -736,7 +736,6 @@ function Create()
 	self:RemoveControlPage("Controls")
 	self:AddControlPage("Controls", { CTID_DIB_ID = "Icons.Tools.Tabs.Image" })
 	self:AddControlPage("Info", { CTID_DIB_ID = "Icons.Tools.Tabs.NumberProbe" })
-	self:AddControlPage("Settings", { CTID_DIB_ID = "Icons.Tools.Tabs.Tools" })
 
 	OutImage = self:AddOutput("Output", "Output", {
 		LINKID_DataType = "Image",
@@ -810,7 +809,7 @@ function Create()
 		LINKS_Name = "<b style='color:#c8b8d8;'>Playback</b>",
 		INP_Default = 1.0,
 		LBLC_DropDownButton = true,
-		LBLC_NumInputs = 6,
+		LBLC_NumInputs = 8,
 		LBLC_NestLevel = 1,
 		IC_ControlPage = 0,
 		INP_DoNotifyChanged = false,
@@ -840,6 +839,20 @@ function Create()
 		IC_ControlPage = 0,
 	})
 
+	self:AddSpacer("ReverseSpacer", {IC_ControlPage = 0})
+
+	InStartOffset = self:AddInput("Start Offset", "StartOffset", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ScrewControl",
+		INP_Default = 0,
+		INP_Integer = true,
+		INP_MinScale = 0,
+		INP_MaxScale = 1000,
+		IC_ControlPage = 0,
+	})
+
+	self:AddSpacer("StartSpacer", {IC_ControlPage = 0})
+
 	InLoopMode = self:AddInput("Loop Behaviour", "LoopMode", {
 		LINKID_DataType = "Number",
 		INPID_InputControl = "ComboControl",
@@ -850,16 +863,6 @@ function Create()
 		{ CCS_AddString = "Ping Pong" },
 		{ CCS_AddString = "Hold Last" },
 		{ CCS_AddString = "Blank" },
-	})
-
-	InStartOffset = self:AddInput("Start Offset", "StartOffset", {
-		LINKID_DataType = "Number",
-		INPID_InputControl = "ScrewControl",
-		INP_Default = 0,
-		INP_Integer = true,
-		INP_MinScale = 0,
-		INP_MaxScale = 1000,
-		IC_ControlPage = 0,
 	})
 
 	-- Start/End share a single dual-handle range slider (RangeControl group).
@@ -889,18 +892,6 @@ function Create()
 		IC_ControlPage = 0,
 	})
 
-	InPrintLogsToConsole = self:AddInput("Print Logs to Console", "PrintLogsToConsole", {
-		LINKID_DataType = "Number",
-		INPID_InputControl = "CheckboxControl",
-		INP_Default = 0.0,
-		INP_Integer = true,
-		INP_DoNotifyChanged = false,
-		INP_InitialNotify = false,
-		INP_External = false,
-		INP_InteractivePassive = true,
-		IC_ControlPage = 2,
-	})
-
 	InSupportNest = self:AddInput("Support", "SupportNest", {
 		IC_ControlPage = 2,
 		LINKID_DataType = "Number",
@@ -913,7 +904,7 @@ function Create()
 		INP_Active = false,
 		LBLC_MultiLine = false,
 		LBLC_DropDownButton = true,
-		LBLC_NumInputs = 3,
+		LBLC_NumInputs = 4,
 	})
 
 	InTestsBtn = self:AddInput("Run Tests", "TestsBtn", {
@@ -956,6 +947,18 @@ function Create()
 		ICD_Width = 0.34,
 		IC_NoLabel = true,
 		IC_NoReset = true,
+	})
+
+	InPrintLogsToConsole = self:AddInput("Print Logs to Console", "PrintLogsToConsole", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = true,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_InteractivePassive = true,
+		IC_ControlPage = 2,
 	})
 
 	InLicenseNest = self:AddInput("License", "LicenseNest", {
