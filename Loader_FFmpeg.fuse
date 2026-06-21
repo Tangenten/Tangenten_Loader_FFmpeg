@@ -255,13 +255,11 @@ local function computeFrameIndex(req, info, comp)
 	end
 
 	local maxFrame = frameCount - 1
-	local playbackMode = math.floor((InPlaybackMode:GetValue(req).Value or 0) + 0.5)
 	local playbackSpeed = InPlaybackSpeed:GetValue(req).Value or 1.0
 	local reverse = (InReverse:GetValue(req).Value or 0) >= 0.5
 	local loopMode = math.floor((InLoopMode:GetValue(req).Value or 0) + 0.5)
 	local startFrame = math.max(0, roundToInt(InStartFrame:GetValue(req).Value or 0))
 	local endFrame = math.max(0, roundToInt(InEndFrame:GetValue(req).Value or 0))
-	local manualFrame = math.max(0, roundToInt(InManualFrame:GetValue(req).Value or 0))
 	local startOffset = math.max(0, roundToInt(InStartOffset:GetValue(req).Value or 0))
 
 	-- End Frame is seeded from the clip on load; the 0 fallback below is kept
@@ -273,31 +271,26 @@ local function computeFrameIndex(req, info, comp)
 
 	local idxInSubset = 0
 	local blank = false
-	if playbackMode == 1 then
-		idxInSubset = clamp(manualFrame, 0, subsetFrameCount - 1)
-		logInfo("[frame-map] Manual", "time", req.Time, "manualFrame", manualFrame, "start", startIdx, "end", endIdx, "idxInSubset", idxInSubset)
-	else
-		local compFps = getCompFrameRate(comp)
-		local sourceFps = info.fps and info.fps > 0 and info.fps or compFps
-		local rate = sourceFps * playbackSpeed
-		local logical = math.floor((((req.Time or 0) - startOffset) * (rate / compFps)) + 0.000001)
-		logInfo("[frame-map] Auto inputs", "time", req.Time, "startOffset", startOffset, "compFps", compFps, "sourceFps", sourceFps, "playbackSpeed", playbackSpeed, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
+	local compFps = getCompFrameRate(comp)
+	local sourceFps = info.fps and info.fps > 0 and info.fps or compFps
+	local rate = sourceFps * playbackSpeed
+	local logical = math.floor((((req.Time or 0) - startOffset) * (rate / compFps)) + 0.000001)
+	logInfo("[frame-map] Auto inputs", "time", req.Time, "startOffset", startOffset, "compFps", compFps, "sourceFps", sourceFps, "playbackSpeed", playbackSpeed, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
 
-		if logical < 0 then
-			-- Before the start offset: output nothing until playback begins.
+	if logical < 0 then
+		-- Before the start offset: output nothing until playback begins.
+		blank = true
+	elseif loopMode == 0 then
+		idxInSubset = umod(logical, subsetFrameCount)
+	elseif loopMode == 1 then
+		idxInSubset = pingpong(logical, subsetFrameCount)
+	elseif loopMode == 2 then
+		idxInSubset = logical >= subsetFrameCount and (subsetFrameCount - 1) or logical
+	else
+		if logical >= subsetFrameCount then
 			blank = true
-		elseif loopMode == 0 then
-			idxInSubset = umod(logical, subsetFrameCount)
-		elseif loopMode == 1 then
-			idxInSubset = pingpong(logical, subsetFrameCount)
-		elseif loopMode == 2 then
-			idxInSubset = logical >= subsetFrameCount and (subsetFrameCount - 1) or logical
 		else
-			if logical >= subsetFrameCount then
-				blank = true
-			else
-				idxInSubset = logical
-			end
+			idxInSubset = logical
 		end
 	end
 
@@ -753,7 +746,7 @@ function Create()
 		LINKS_Name = "<b style='color:#c8b8d8;'>Playback</b>",
 		INP_Default = 1.0,
 		LBLC_DropDownButton = true,
-		LBLC_NumInputs = 8,
+		LBLC_NumInputs = 6,
 		LBLC_NestLevel = 1,
 		IC_ControlPage = 0,
 		INP_DoNotifyChanged = false,
@@ -762,18 +755,6 @@ function Create()
 		INP_Passive = true,
 		IC_NoLabel = true,
 		IC_NoReset = true,
-	})
-
-	InPlaybackMode = self:AddInput("Playback Mode", "PlaybackMode", {
-		LINKID_DataType = "Number",
-		INPID_InputControl = "ComboControl",
-		INP_Default = 0,
-		INP_Integer = true,
-		INP_DoNotifyChanged = true,
-		INP_InitialNotify = false,
-		IC_ControlPage = 0,
-		{ CCS_AddString = "Auto" },
-		{ CCS_AddString = "Manual" },
 	})
 
 	InPlaybackSpeed = self:AddInput("Playback Speed", "PlaybackSpeed", {
@@ -837,16 +818,6 @@ function Create()
 		INPID_InputControl = "RangeControl",
 		IC_ControlGroup = 1,
 		IC_ControlID = 1,
-		INP_Default = 0,
-		INP_Integer = true,
-		INP_MinScale = 0,
-		INP_MaxScale = 1000,
-		IC_ControlPage = 0,
-	})
-
-	InManualFrame = self:AddInput("Frame", "ManualFrame", {
-		LINKID_DataType = "Number",
-		INPID_InputControl = "SliderControl",
 		INP_Default = 0,
 		INP_Integer = true,
 		INP_MinScale = 0,
@@ -991,17 +962,6 @@ end
 --endregion Create
 
 --region NotifyChanged
-local function updatePlaybackVisibility(mode)
-	local manual = math.floor((mode or 0) + 0.5) == 1
-	if InManualFrame then InManualFrame:SetAttrs({ IC_Visible = manual }) end
-	if InPlaybackSpeed then InPlaybackSpeed:SetAttrs({ IC_Visible = not manual }) end
-	if InReverse then InReverse:SetAttrs({ IC_Visible = not manual }) end
-	if InLoopMode then InLoopMode:SetAttrs({ IC_Visible = not manual }) end
-	if InStartOffset then InStartOffset:SetAttrs({ IC_Visible = not manual }) end
-	if InStartFrame then InStartFrame:SetAttrs({ IC_Visible = true }) end
-	if InEndFrame then InEndFrame:SetAttrs({ IC_Visible = true }) end
-end
-
 local function resetButton(input)
 	if input and Number then
 		input:SetSource(Number(0), 0, 0)
@@ -1105,11 +1065,6 @@ function NotifyChanged(inp, param, time)
 		return
 	end
 
-	if inp == InPlaybackMode then
-		updatePlaybackVisibility(param.Value or 0)
-		return
-	end
-
 	if inp == InTestsBtn and param.Value >= 0.5 then
 		local ok, err = pcall(Tests)
 		if not ok then
@@ -1151,7 +1106,6 @@ end
 
 --region OnAddToFlow
 function OnAddToFlow()
-	updatePlaybackVisibility(0)
 	seedClipDefaultsFromCurrentPath()
 	if TOOL_RUN_TESTS_ON_STARTUP then
 		Tests()
