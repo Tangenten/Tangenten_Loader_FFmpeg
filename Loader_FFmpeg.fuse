@@ -25,7 +25,7 @@ local TOOL_DEVELOPER_WEBSITE = "https://tangenten.xyz"
 local TOOL_VERSION = "0.3.0"
 
 local TOOL_PUBLISHED = false
-local TOOL_ENABLE_LOGGING = not TOOL_PUBLISHED
+local TOOL_ENABLE_LOGGING = false
 local TOOL_RUN_TESTS_ON_STARTUP = not TOOL_PUBLISHED
 
 LOADER_LIBAV = LOADER_LIBAV
@@ -59,8 +59,24 @@ local function logLine(...)
 	print("[" .. TOOL_NAME .. "] " .. stringifyArgs(...))
 end
 
+local function logEnabled()
+	if TOOL_ENABLE_LOGGING then return true end
+	if not RUNNING_IN_FUSION or not InPrintLogsToConsole then return false end
+
+	local ok, source = pcall(function()
+		if REQF_SecondaryTime then
+			return InPrintLogsToConsole:GetSource(0, REQF_SecondaryTime, REQF_SecondaryTime)
+		end
+
+		return InPrintLogsToConsole:GetSource(0)
+	end)
+	if not ok or not source then return false end
+
+	return (source.Value or 0) >= 0.5
+end
+
 local function logInfo(...)
-	if not TOOL_ENABLE_LOGGING then return end
+	if not logEnabled() then return end
 	logLine(...)
 end
 
@@ -568,6 +584,7 @@ function Create()
 	self:RemoveControlPage("Controls")
 	self:AddControlPage("Controls", { CTID_DIB_ID = "Icons.Tools.Tabs.Image" })
 	self:AddControlPage("Info", { CTID_DIB_ID = "Icons.Tools.Tabs.NumberProbe" })
+	self:AddControlPage("Settings", { CTID_DIB_ID = "Icons.Tools.Tabs.Tools" })
 
 	OutImage = self:AddOutput("Output", "Output", {
 		LINKID_DataType = "Image",
@@ -727,6 +744,18 @@ function Create()
 		INP_MinScale = 0,
 		INP_MaxScale = 1000,
 		IC_ControlPage = 0,
+	})
+
+	InPrintLogsToConsole = self:AddInput("Print Logs to Console", "PrintLogsToConsole", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "CheckboxControl",
+		INP_Default = 0.0,
+		INP_Integer = true,
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		INP_InteractivePassive = true,
+		IC_ControlPage = 2,
 	})
 
 	InSupportNest = self:AddInput("Support", "SupportNest", {
