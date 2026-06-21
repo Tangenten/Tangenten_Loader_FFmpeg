@@ -442,6 +442,16 @@ local function setNoDataOutput(tool, req, width, height)
 	OutImage:Set(req, createImage(tool, req, width or 1, height or 1, true))
 end
 
+-- A genuinely empty (transparent) frame. IMG_NoData is a precalc-only header
+-- with no pixel memory; as a real Process output the viewer shows nothing new
+-- and keeps the previous frame. Allocate and clear so the viewer truly blanks.
+local function setBlankOutput(tool, req, width, height)
+	local img = createImage(tool, req, width or 1, height or 1, false)
+	img:Clear()
+	logInfo("[image] Output blank", "time", req.Time, "size", tostring(width or 1) .. "x" .. tostring(height or 1))
+	OutImage:Set(req, img)
+end
+
 local function sampleBytes(ptr, byteCount)
 	if not LOADER_LIBAV or not LOADER_LIBAV.ffi or ptr == nil then
 		return 0
@@ -1032,7 +1042,7 @@ function Process(req)
 	logInfo("[process] Frame decision", "time", req.Time, "frameIndex", frameIndex, "blank", blank)
 	if blank then
 		logInfo("[process] Blank frame requested")
-		setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
+		setBlankOutput(self, req, decoder.info.width, decoder.info.height)
 		return
 	end
 
