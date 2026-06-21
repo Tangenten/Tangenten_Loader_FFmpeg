@@ -240,7 +240,7 @@ local function computeFrameIndex(req, info, comp)
 
 	local maxFrame = frameCount - 1
 	local playbackMode = math.floor((InPlaybackMode:GetValue(req).Value or 0) + 0.5)
-	local playbackFps = InPlaybackFPS:GetValue(req).Value or 0
+	local playbackSpeed = InPlaybackSpeed:GetValue(req).Value or 1.0
 	local reverse = (InReverse:GetValue(req).Value or 0) >= 0.5
 	local loopMode = math.floor((InLoopMode:GetValue(req).Value or 0) + 0.5)
 	local startFrame = math.max(0, roundToInt(InStartFrame:GetValue(req).Value or 0))
@@ -248,9 +248,9 @@ local function computeFrameIndex(req, info, comp)
 	local manualFrame = math.max(0, roundToInt(InManualFrame:GetValue(req).Value or 0))
 	local startOffset = math.max(0, roundToInt(InStartOffset:GetValue(req).Value or 0))
 
-	-- End/FPS are seeded from the clip on load; the 0 fallbacks below are kept
+	-- End Frame is seeded from the clip on load; the 0 fallback below is kept
 	-- only as a safety net for unseeded states (e.g. a comp opened with a path
-	-- already set), so a stray 0 means "whole clip" / "source rate", not frozen.
+	-- already set), so a stray 0 means "whole clip", not a single frame.
 	local startIdx = clamp(startFrame, 0, maxFrame)
 	local endIdx = endFrame == 0 and maxFrame or clamp(endFrame - 1, startIdx, maxFrame)
 	local subsetFrameCount = math.max(1, endIdx - startIdx + 1)
@@ -263,9 +263,9 @@ local function computeFrameIndex(req, info, comp)
 	else
 		local compFps = getCompFrameRate(comp)
 		local sourceFps = info.fps and info.fps > 0 and info.fps or compFps
-		local rate = playbackFps > 0 and playbackFps or sourceFps
+		local rate = sourceFps * playbackSpeed
 		local logical = math.floor((((req.Time or 0) - startOffset) * (rate / compFps)) + 0.000001)
-		logInfo("[frame-map] Auto inputs", "time", req.Time, "startOffset", startOffset, "compFps", compFps, "sourceFps", sourceFps, "playbackFps", playbackFps, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
+		logInfo("[frame-map] Auto inputs", "time", req.Time, "startOffset", startOffset, "compFps", compFps, "sourceFps", sourceFps, "playbackSpeed", playbackSpeed, "rate", rate, "logical", logical, "loopMode", loopMode, "reverse", reverse, "range", startIdx .. "-" .. endIdx)
 
 		if logical < 0 then
 			-- Before the start offset: output nothing until playback begins.
@@ -632,12 +632,13 @@ function Create()
 		{ CCS_AddString = "Manual" },
 	})
 
-	InPlaybackFPS = self:AddInput("Playback FPS", "PlaybackFPS", {
+	InPlaybackSpeed = self:AddInput("Playback Speed", "PlaybackSpeed", {
 		LINKID_DataType = "Number",
 		INPID_InputControl = "SliderControl",
-		INP_Default = 24.0,
+		INP_Default = 1.0,
 		INP_MinScale = 0.0,
-		INP_MaxScale = 120.0,
+		INP_MaxScale = 4.0,
+		ICD_Center = 1.0,
 		IC_DisplayedPrecision = 3,
 		IC_ControlPage = 0,
 	})
@@ -837,7 +838,7 @@ end
 local function updatePlaybackVisibility(mode)
 	local manual = math.floor((mode or 0) + 0.5) == 1
 	if InManualFrame then InManualFrame:SetAttrs({ IC_Visible = manual }) end
-	if InPlaybackFPS then InPlaybackFPS:SetAttrs({ IC_Visible = not manual }) end
+	if InPlaybackSpeed then InPlaybackSpeed:SetAttrs({ IC_Visible = not manual }) end
 	if InReverse then InReverse:SetAttrs({ IC_Visible = not manual }) end
 	if InLoopMode then InLoopMode:SetAttrs({ IC_Visible = not manual }) end
 	if InStartOffset then InStartOffset:SetAttrs({ IC_Visible = not manual }) end
@@ -874,18 +875,12 @@ local function probeClipInfo(comp, rawPath)
 	return info, mapped
 end
 
--- On a freshly loaded clip, seed Playback FPS and End Frame from the source so
--- both the live value and the reset default match the clip, and grow the slider
--- scales so the new values stay reachable.
+-- On a freshly loaded clip, seed End Frame from the source so both the live
+-- value and the reset default match the clip, and grow the slider scale so the
+-- new value stays reachable. Playback Speed stays at the user's multiplier; the
+-- actual rate comes from the clip's own fps in computeFrameIndex.
 local function applyClipDefaults(info)
 	if not info or not Number then return end
-
-	local fps = (info.fps and info.fps > 0) and info.fps or nil
-	if fps and InPlaybackFPS then
-		InPlaybackFPS:SetAttrs({ INP_Default = fps, INP_MaxScale = math.max(fps, 120.0) })
-		InPlaybackFPS:SetSource(Number(fps), 0, 0)
-		logInfo("[defaults] PlaybackFPS", "value", fps)
-	end
 
 	local frameCount = getInfoFrameCount(info)
 	if frameCount > 0 and InEndFrame then
