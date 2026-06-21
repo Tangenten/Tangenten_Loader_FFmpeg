@@ -564,7 +564,7 @@ function Create()
 		LINKS_Name = "Path",
 		IC_ControlPage = 0,
 		FC_IsSaver = false,
-		FC_ClipBrowse = true,
+		FC_ClipBrowse = false,
 		FC_PathBrowse = false,
 		FCS_FilterString = "All Files (*.*)|*.*|Video Files (*.mov *.mp4 *.mkv *.avi *.webm *.m4v)|*.mov;*.mp4;*.mkv;*.avi;*.webm;*.m4v|",
 		INP_DoNotifyChanged = true,
@@ -646,9 +646,14 @@ function Create()
 		{ CCS_AddString = "Blank" },
 	})
 
+	-- Start/End share a single dual-handle range slider (RangeControl group).
+	-- Same IC_ControlGroup pairs them; IC_ControlID 0 = low (start), 1 = high (end).
 	InStartFrame = self:AddInput("Start Frame", "StartFrame", {
 		LINKID_DataType = "Number",
-		INPID_InputControl = "SliderControl",
+		INPID_InputControl = "RangeControl",
+		IC_ControlGroup = 1,
+		IC_ControlID = 0,
+		RNGCS_MidName = "Frame Range",
 		INP_Default = 0,
 		INP_Integer = true,
 		INP_MinScale = 0,
@@ -658,7 +663,9 @@ function Create()
 
 	InEndFrame = self:AddInput("End Frame (0 = All)", "EndFrame", {
 		LINKID_DataType = "Number",
-		INPID_InputControl = "SliderControl",
+		INPID_InputControl = "RangeControl",
+		IC_ControlGroup = 1,
+		IC_ControlID = 1,
 		INP_Default = 0,
 		INP_Integer = true,
 		INP_MinScale = 0,
