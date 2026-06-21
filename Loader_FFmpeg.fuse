@@ -634,7 +634,7 @@ function Create()
 
 	InPlaybackSpeed = self:AddInput("Playback Speed", "PlaybackSpeed", {
 		LINKID_DataType = "Number",
-		INPID_InputControl = "SliderControl",
+		INPID_InputControl = "ScrewControl",
 		INP_Default = 1.0,
 		INP_MinScale = 0.0,
 		INP_MaxScale = 4.0,
@@ -665,7 +665,7 @@ function Create()
 
 	InStartOffset = self:AddInput("Start Offset", "StartOffset", {
 		LINKID_DataType = "Number",
-		INPID_InputControl = "SliderControl",
+		INPID_InputControl = "ScrewControl",
 		INP_Default = 0,
 		INP_Integer = true,
 		INP_MinScale = 0,
