@@ -532,6 +532,7 @@ end
 function Create()
 	self:RemoveControlPage("Controls")
 	self:AddControlPage("Controls", { CTID_DIB_ID = "Icons.Tools.Tabs.Image" })
+	self:AddControlPage("Info", { CTID_DIB_ID = "Icons.Tools.Tabs.NumberProbe" })
 
 	OutImage = self:AddOutput("Output", "Output", {
 		LINKID_DataType = "Image",
@@ -575,7 +576,7 @@ function Create()
 		LINKID_DataType = "Text",
 		INPID_InputControl = "LabelControl",
 		LINKS_Name = makeStatusHtml("No video loaded", { "Choose a video path and render a frame." }, false),
-		IC_ControlPage = 0,
+		IC_ControlPage = 1,
 		INP_DoNotifyChanged = false,
 		INP_InitialNotify = false,
 		INP_External = false,
@@ -676,7 +677,7 @@ function Create()
 	})
 
 	InSupportNest = self:AddInput("Support", "SupportNest", {
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		LINKID_DataType = "Number",
 		INPID_InputControl = "LabelControl",
 		INP_DoNotifyChanged = false,
@@ -698,7 +699,7 @@ function Create()
 		INP_DoNotifyChanged = true,
 		INP_InitialNotify = false,
 		INP_External = false,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		ICD_Width = 0.33,
 		IC_NoLabel = true,
 		IC_NoReset = true,
@@ -712,7 +713,7 @@ function Create()
 		INP_DoNotifyChanged = true,
 		INP_InitialNotify = false,
 		INP_External = false,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		ICD_Width = 0.33,
 		IC_NoLabel = true,
 		IC_NoReset = true,
@@ -726,14 +727,14 @@ function Create()
 		INP_DoNotifyChanged = true,
 		INP_InitialNotify = false,
 		INP_External = false,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		ICD_Width = 0.34,
 		IC_NoLabel = true,
 		IC_NoReset = true,
 	})
 
 	InLicenseNest = self:AddInput("License", "LicenseNest", {
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		LINKID_DataType = "Number",
 		INPID_InputControl = "LabelControl",
 		INP_DoNotifyChanged = false,
@@ -758,7 +759,7 @@ function Create()
 		INP_Active = false,
 		IC_NoLabel = true,
 		IC_NoReset = true,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		LBLC_MultiLine = true,
 	})
 
@@ -774,7 +775,7 @@ function Create()
 		INP_Active = false,
 		IC_NoLabel = true,
 		IC_NoReset = true,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 		LBLC_MultiLine = true,
 	})
 
@@ -794,7 +795,7 @@ function Create()
 		INP_Passive = true,
 		IC_NoLabel = true,
 		IC_NoReset = true,
-		IC_ControlPage = 1,
+		IC_ControlPage = 2,
 	})
 end
 --endregion Create
