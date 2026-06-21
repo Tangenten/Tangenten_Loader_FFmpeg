@@ -22,7 +22,7 @@ local TOOL_DESCRIPTION = "Loads video frames through fuse-local FFmpeg/libav lib
 local TOOL_ABBREVIATION = "LDFF"
 local TOOL_DEVELOPER = "Tangenten"
 local TOOL_DEVELOPER_WEBSITE = "https://tangenten.xyz"
-local TOOL_VERSION = "0.2.0"
+local TOOL_VERSION = "0.3.0"
 
 local TOOL_PUBLISHED = false
 local TOOL_ENABLE_LOGGING = not TOOL_PUBLISHED
@@ -53,19 +53,19 @@ local function stringifyArgs(...)
 	return table.concat(parts, " ")
 end
 
-if not dump then
-	dump = function(...)
-		print(stringifyArgs(...))
-	end
+-- Fusion's global dump() prints each argument on its own console line. Route
+-- logs through a single concatenated print so each entry stays on one line.
+local function logLine(...)
+	print("[" .. TOOL_NAME .. "] " .. stringifyArgs(...))
 end
 
 local function logInfo(...)
 	if not TOOL_ENABLE_LOGGING then return end
-	dump("[" .. TOOL_NAME .. "]", ...)
+	logLine(...)
 end
 
 local function logCritical(...)
-	dump("[" .. TOOL_NAME .. "]", ...)
+	logLine(...)
 end
 
 local function logError(...)
