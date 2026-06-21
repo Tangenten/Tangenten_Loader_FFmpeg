@@ -415,12 +415,11 @@ local function setStatusHtml(html)
 		return
 	end
 	if LOADER_STATUS_HTML == html then
-		logInfo("[status] Unchanged")
 		return
 	end
 
 	LOADER_STATUS_HTML = html
-	logInfo("[status] Updating metadata label", html)
+	logInfo("[status] Updating metadata label")
 	InMetadataStatus:SetAttrs({ LINKS_Name = html })
 end
 
@@ -455,12 +454,6 @@ local function setInfoStatus(info, path, runtime)
 		if LOADER_LIBAV and LOADER_LIBAV.bridgePath then
 			lines[#lines + 1] = string.format("Bridge path: %s", LOADER_LIBAV.bridgePath)
 		end
-		if runtime.frameIndex ~= nil then
-			lines[#lines + 1] = string.format("Requested frame: %s", tostring(runtime.frameIndex))
-		end
-		if runtime.reportedFrame ~= nil then
-			lines[#lines + 1] = string.format("Decoded frame: %s", tostring(runtime.reportedFrame))
-		end
 		if runtime.outputSize then
 			lines[#lines + 1] = string.format("Output: %s", runtime.outputSize)
 		end
@@ -469,12 +462,6 @@ local function setInfoStatus(info, path, runtime)
 		end
 		if runtime.fallbackReason and runtime.fallbackReason ~= "" then
 			lines[#lines + 1] = string.format("Fallback: %s", runtime.fallbackReason)
-		end
-		if LOADER_LIBAV and LOADER_LIBAV.lastDebug then
-			local debug = LOADER_LIBAV.lastDebug()
-			if debug and debug ~= "" then
-				lines[#lines + 1] = string.format("Bridge debug: %s", debug)
-			end
 		end
 	end
 
@@ -1178,8 +1165,6 @@ function Process(req)
 		return
 	end
 
-	setInfoStatus(decoder.info, mappedPath)
-
 	local frameIndex, blank = computeFrameIndex(req, decoder.info, self.Comp)
 	logInfo("[process] Frame decision", "time", req.Time, "frameIndex", frameIndex, "blank", blank)
 	if blank then
@@ -1187,7 +1172,6 @@ function Process(req)
 		setBlankOutput(self, req, decoder.info.width, decoder.info.height)
 		setInfoStatus(decoder.info, mappedPath, {
 			decodePath = "Blank frame",
-			frameIndex = frameIndex,
 			outputSize = string.format("%d x %d", decoder.info.width or 0, decoder.info.height or 0),
 		})
 		return
@@ -1230,8 +1214,6 @@ function Process(req)
 
 	setInfoStatus(decoder.info, mappedPath, {
 		decodePath = decodePath,
-		frameIndex = frameIndex,
-		reportedFrame = tonumber(frame.frame_index),
 		outputSize = string.format("%d x %d", tonumber(frame.width) or 0, tonumber(frame.height) or 0),
 		stride = tonumber(frame.stride),
 		fallbackReason = fallbackReason,
