@@ -28,6 +28,9 @@ local TOOL_PUBLISHED = false
 local TOOL_ENABLE_LOGGING = false
 local TOOL_RUN_TESTS_ON_STARTUP = not TOOL_PUBLISHED
 
+local OUTPUT_FORMAT_UINT8 = 0
+local OUTPUT_FORMAT_FLOAT32 = 1
+
 LOADER_LIBAV = LOADER_LIBAV
 LOADER_LIBAV_ERROR = LOADER_LIBAV_ERROR
 LOADER_DECODER = LOADER_DECODER
@@ -463,6 +466,7 @@ local function setInfoStatus(info, path, runtime)
 		tostring(info.pixelFormat or ""),
 		tostring(info.hwAccel or ""),
 		runtime and tostring(runtime.decodePath or "") or "",
+		runtime and tostring(runtime.outputFormat or "") or "",
 		runtime and tostring(runtime.outputSize or "") or "",
 		runtime and tostring(runtime.stride or "") or "",
 		runtime and tostring(runtime.fallbackReason or "") or "",
@@ -485,6 +489,9 @@ local function setInfoStatus(info, path, runtime)
 	if runtime then
 		lines[#lines + 1] = ""
 		lines[#lines + 1] = string.format("Runtime: %s", runtime.decodePath or "unknown")
+		if runtime.outputFormat then
+			lines[#lines + 1] = string.format("Output format: %s", runtime.outputFormat)
+		end
 		lines[#lines + 1] = string.format("Bridge: %s", libAVVersion())
 		if LOADER_LIBAV and LOADER_LIBAV.bridgePath then
 			lines[#lines + 1] = string.format("Bridge path: %s", LOADER_LIBAV.bridgePath)
@@ -509,7 +516,21 @@ local function setErrorStatus(title, detail)
 	setStatusHtml(makeStatusHtml(title, { tostring(detail or "") }, true))
 end
 
-local function createImage(tool, req, width, height, noData)
+local function getOutputFormat(req)
+	if not InOutputFormat then
+		return OUTPUT_FORMAT_UINT8, 5, 4, "UInt8 RGBA"
+	end
+
+	local value = InOutputFormat:GetValue(req)
+	local format = math.floor(((value and value.Value) or 0) + 0.5)
+	if format == OUTPUT_FORMAT_FLOAT32 then
+		return OUTPUT_FORMAT_FLOAT32, 8, 16, "Float32 RGBA"
+	end
+
+	return OUTPUT_FORMAT_UINT8, 5, 4, "UInt8 RGBA"
+end
+
+local function createImage(tool, req, width, height, noData, depth)
 	local attrs = {
 		IMG_Document = tool.Comp,
 		{ IMG_Channel = "Red" },
@@ -518,7 +539,7 @@ local function createImage(tool, req, width, height, noData)
 		{ IMG_Channel = "Alpha" },
 		IMG_Width = math.max(1, math.floor(width or 1)),
 		IMG_Height = math.max(1, math.floor(height or 1)),
-		IMG_Depth = 5,
+		IMG_Depth = depth or 5,
 		IMG_XScale = 1.0,
 		IMG_YScale = 1.0,
 		IMG_Quality = not req:IsQuick(),
@@ -534,14 +555,16 @@ end
 
 local function setNoDataOutput(tool, req, width, height)
 	logInfo("[image] Output no-data", "time", req.Time, "size", tostring(width or 1) .. "x" .. tostring(height or 1))
-	OutImage:Set(req, createImage(tool, req, width or 1, height or 1, true))
+	local _, depth = getOutputFormat(req)
+	OutImage:Set(req, createImage(tool, req, width or 1, height or 1, true, depth))
 end
 
 -- A genuinely empty (transparent) frame. IMG_NoData is a precalc-only header
 -- with no pixel memory; as a real Process output the viewer shows nothing new
 -- and keeps the previous frame. Allocate and clear so the viewer truly blanks.
 local function setBlankOutput(tool, req, width, height)
-	local img = createImage(tool, req, width or 1, height or 1, false)
+	local _, depth = getOutputFormat(req)
+	local img = createImage(tool, req, width or 1, height or 1, false, depth)
 	img:Clear()
 	logInfo("[image] Output blank", "time", req.Time, "size", tostring(width or 1) .. "x" .. tostring(height or 1))
 	OutImage:Set(req, img)
@@ -578,11 +601,7 @@ local function copyFrameToImage(outImg, frame)
 	end
 
 	-- GetScanLine() returns a live, writable array of row pointers into the
-	-- image's own pixel memory. The output image is 8-bit RGBA (IMG_Depth 5), so
-	-- the array is uint8_t**. On Resolve (ReFu15+) each scanline is RGBA, matching
-	-- the bridge's AV_PIX_FMT_RGBA output, so rows copy straight across without a
-	-- swizzle. Writing scanlines directly bypasses _FromMemory, which dropped the
-	-- bottom scanline (y=0) regardless of source pointer.
+	-- buffered fallback image's 8-bit RGBA memory.
 	local rawScanlines = outImg:GetScanLine()
 	if rawScanlines == nil then
 		return false, "Image:GetScanLine returned nil"
@@ -605,7 +624,7 @@ local function copyFrameToImage(outImg, frame)
 	return true
 end
 
-local function getDirectImageTarget(outImg, width, height)
+local function getDirectImageTarget(outImg, width, height, bytesPerPixel)
 	local ffi = LOADER_LIBAV and LOADER_LIBAV.ffi
 	if not ffi then return nil, nil, "LibAV FFI unavailable" end
 	if not outImg.GetScanLine then return nil, nil, "Fusion Image:GetScanLine is unavailable" end
@@ -620,7 +639,7 @@ local function getDirectImageTarget(outImg, width, height)
 		return nil, nil, "Image:GetScanLine returned a null pointer"
 	end
 
-	local rowBytes = width * 4
+	local rowBytes = width * bytesPerPixel
 	local topRow = scanlines[height - 1]
 	if topRow == nil or topRow == ffi.NULL then
 		return nil, nil, "Top scanline is null"
@@ -649,19 +668,27 @@ local function getDirectImageTarget(outImg, width, height)
 	return topRow, stride, nil
 end
 
-local function decodeFrameIntoImage(decoder, frameIndex, outImg)
+local function decodeFrameIntoImage(decoder, frameIndex, outImg, outputFormat, bytesPerPixel)
 	if not decoder.decodeInto then
 		return nil, "LibAV bridge does not expose direct image decode"
+	end
+	if outputFormat ~= OUTPUT_FORMAT_UINT8 and not decoder.decodeIntoFormat then
+		return nil, "LibAV bridge does not expose formatted direct image decode"
 	end
 
 	local width = math.max(1, math.floor(decoder.info.width or 1))
 	local height = math.max(1, math.floor(decoder.info.height or 1))
-	local dst, stride, targetErr = getDirectImageTarget(outImg, width, height)
+	local dst, stride, targetErr = getDirectImageTarget(outImg, width, height, bytesPerPixel or 4)
 	if not dst then
 		return nil, targetErr
 	end
 
-	local frame, decodeErr = decoder:decodeInto(frameIndex, dst, stride)
+	local frame, decodeErr
+	if outputFormat == OUTPUT_FORMAT_UINT8 then
+		frame, decodeErr = decoder:decodeInto(frameIndex, dst, stride)
+	else
+		frame, decodeErr = decoder:decodeIntoFormat(frameIndex, dst, stride, outputFormat)
+	end
 	if not frame then
 		return nil, decodeErr
 	end
@@ -724,7 +751,7 @@ function Create()
 		LINKS_Name = "<b style='color:#b8c8d8;'>Input</b>",
 		INP_Default = 1.0,
 		LBLC_DropDownButton = true,
-		LBLC_NumInputs = 2,
+		LBLC_NumInputs = 3,
 		LBLC_NestLevel = 1,
 		IC_ControlPage = 0,
 		INP_DoNotifyChanged = false,
@@ -747,6 +774,19 @@ function Create()
 		INP_DoNotifyChanged = true,
 		INP_InitialNotify = false,
 		INP_External = false,
+	})
+
+	InOutputFormat = self:AddInput("Output Format", "OutputFormat", {
+		LINKID_DataType = "Number",
+		INPID_InputControl = "ComboControl",
+		INP_Default = OUTPUT_FORMAT_UINT8,
+		INP_Integer = true,
+		INP_DoNotifyChanged = false,
+		INP_InitialNotify = false,
+		INP_External = false,
+		IC_ControlPage = 0,
+		{ CCS_AddString = "UInt8 RGBA" },
+		{ CCS_AddString = "Float32 RGBA" },
 	})
 
 	InMetadataStatus = self:AddInput("", "MetadataStatus", {
@@ -1212,19 +1252,21 @@ function Process(req)
 	end
 
 	local frameIndex, blank = computeFrameIndex(req, decoder.info, self.Comp)
+	local outputFormat, outputDepth, bytesPerPixel, outputFormatName = getOutputFormat(req)
 	logInfo("[process] Frame decision", "time", req.Time, "frameIndex", frameIndex, "blank", blank)
 	if blank then
 		logInfo("[process] Blank frame requested")
 		setBlankOutput(self, req, decoder.info.width, decoder.info.height)
 		setInfoStatus(decoder.info, mappedPath, {
 			decodePath = "Blank frame",
+			outputFormat = outputFormatName,
 			outputSize = string.format("%d x %d", decoder.info.width or 0, decoder.info.height or 0),
 		})
 		return
 	end
 
-	local outImg = createImage(self, req, decoder.info.width, decoder.info.height, false)
-	logInfo("[process] Created output image", "width", tonumber(decoder.info.width), "height", tonumber(decoder.info.height), "hasGetScanLine", outImg.GetScanLine ~= nil)
+	local outImg = createImage(self, req, decoder.info.width, decoder.info.height, false, outputDepth)
+	logInfo("[process] Created output image", "width", tonumber(decoder.info.width), "height", tonumber(decoder.info.height), "depth", outputDepth, "format", outputFormatName, "hasGetScanLine", outImg.GetScanLine ~= nil)
 	if not outImg.GetScanLine then
 		setErrorStatus("Image output failed", "Fusion Image:GetScanLine is unavailable")
 		setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
@@ -1232,11 +1274,17 @@ function Process(req)
 	end
 
 	logInfo("[process] Direct decoding frame", frameIndex)
-	local frame, directErr = decodeFrameIntoImage(decoder, frameIndex, outImg)
+	local frame, directErr = decodeFrameIntoImage(decoder, frameIndex, outImg, outputFormat, bytesPerPixel)
 	local decodePath = "Direct to Fusion image"
 	local fallbackReason = nil
 	logInfo("[process] Direct decode result", "ok", frame ~= nil, "err", tostring(directErr), "bridgeDebug", LOADER_LIBAV.lastDebug and LOADER_LIBAV.lastDebug() or "")
 	if not frame then
+		if outputFormat ~= OUTPUT_FORMAT_UINT8 then
+			setErrorStatus("Frame decode failed", directErr)
+			setNoDataOutput(self, req, decoder.info.width, decoder.info.height)
+			return
+		end
+
 		logInfo("[process] Falling back to buffered decode", tostring(directErr))
 		decodePath = "Buffered fallback"
 		fallbackReason = tostring(directErr or "")
@@ -1260,6 +1308,7 @@ function Process(req)
 
 	setInfoStatus(decoder.info, mappedPath, {
 		decodePath = decodePath,
+		outputFormat = outputFormatName,
 		outputSize = string.format("%d x %d", tonumber(frame.width) or 0, tonumber(frame.height) or 0),
 		stride = tonumber(frame.stride),
 		fallbackReason = fallbackReason,

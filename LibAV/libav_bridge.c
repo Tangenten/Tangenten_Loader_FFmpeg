@@ -145,6 +145,7 @@ typedef struct TlavDecoder {
 	int height;
 	int last_scaled_rows;
 	enum AVPixelFormat sws_source_format;
+	enum AVPixelFormat sws_dest_format;
 	int stream_index;
 	double fps;
 	double duration;
@@ -985,8 +986,52 @@ static int estimateFrameIndex(TlavDecoder* dec, int64_t* outIndex)
 	return 0;
 }
 
-static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride)
+static int outputFormatBytesPerPixel(int outputFormat)
 {
+	return outputFormat == 1 ? 16 : 4;
+}
+
+static enum AVPixelFormat outputFormatPixelFormat(int outputFormat)
+{
+	if (outputFormat == 1) {
+#ifdef AV_PIX_FMT_RGBAF32
+		return AV_PIX_FMT_RGBAF32;
+#else
+		return AV_PIX_FMT_NONE;
+#endif
+	}
+
+	return AV_PIX_FMT_RGBA;
+}
+
+static const char* outputFormatName(int outputFormat)
+{
+	return outputFormat == 1 ? "rgba-float32" : "rgba-uint8";
+}
+
+static int copyRgbaCacheToFloatBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride);
+
+static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride, int outputFormat)
+{
+	if (outputFormat == 1) {
+		if (!convertFrameToBuffer(dec, NULL, 0, 0)) {
+			return 0;
+		}
+		if (dstLineStride == 0) {
+			setError("Destination stride is zero");
+			return 0;
+		}
+		if (dstLineStride > 0 && dstLineStride < dec->width * 16) {
+			setError("Destination stride %d is too small for rgba-float32 width %d", dstLineStride, dec->width);
+			return 0;
+		}
+		if (dstLineStride < 0 && -dstLineStride < dec->width * 16) {
+			setError("Destination stride %d is too small for rgba-float32 width %d", dstLineStride, dec->width);
+			return 0;
+		}
+		return copyRgbaCacheToFloatBuffer(dec, dstBuffer, dstLineStride);
+	}
+
 	AVFrame* srcFrame = dec->frame;
 
 	/* Hardware-decoded frames live in GPU memory; pull them down to a CPU frame
@@ -1006,13 +1051,23 @@ static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLin
 	int width = srcFrame->width > 0 ? srcFrame->width : dec->width;
 	int height = srcFrame->height > 0 ? srcFrame->height : dec->height;
 	enum AVPixelFormat sourceFormat = (enum AVPixelFormat)srcFrame->format;
+	enum AVPixelFormat destFormat = outputFormatPixelFormat(outputFormat);
+	int pixelBytes = outputFormatBytesPerPixel(outputFormat);
 
 	if (width <= 0 || height <= 0) {
 		setError("Decoded frame has invalid size %dx%d", width, height);
 		return 0;
 	}
+	if (destFormat == AV_PIX_FMT_NONE) {
+		setError("Output format %s is not supported by this bridge build", outputFormatName(outputFormat));
+		return 0;
+	}
 
 	if (!dstBuffer) {
+		if (outputFormat != 0) {
+			setError("Buffered decode only supports rgba-uint8 output");
+			return 0;
+		}
 		int needed = width * height * 4;
 		if (!dec->rgba || dec->rgba_size < needed) {
 			uint8_t* next = (uint8_t*)realloc(dec->rgba, (size_t)needed);
@@ -1029,23 +1084,30 @@ static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLin
 	} else if (dstLineStride == 0) {
 		setError("Destination stride is zero");
 		return 0;
+	} else if (dstLineStride > 0 && dstLineStride < width * pixelBytes) {
+		setError("Destination stride %d is too small for %s width %d", dstLineStride, outputFormatName(outputFormat), width);
+		return 0;
+	} else if (dstLineStride < 0 && -dstLineStride < width * pixelBytes) {
+		setError("Destination stride %d is too small for %s width %d", dstLineStride, outputFormatName(outputFormat), width);
+		return 0;
 	}
 
-	if (!dec->sws || dec->width != width || dec->height != height || dec->sws_source_format != sourceFormat) {
+	if (!dec->sws || dec->width != width || dec->height != height || dec->sws_source_format != sourceFormat || dec->sws_dest_format != destFormat) {
 		if (dec->sws) {
 			gApi.sws_freeContext(dec->sws);
 			dec->sws = NULL;
 		}
 
-		dec->sws = gApi.sws_getContext(width, height, sourceFormat, width, height, AV_PIX_FMT_RGBA, SWS_BILINEAR, NULL, NULL, NULL);
+		dec->sws = gApi.sws_getContext(width, height, sourceFormat, width, height, destFormat, SWS_BILINEAR, NULL, NULL, NULL);
 		if (!dec->sws) {
-			setError("Could not create swscale context");
+			setError("Could not create swscale context for %s", outputFormatName(outputFormat));
 			return 0;
 		}
 
 		dec->width = width;
 		dec->height = height;
 		dec->sws_source_format = sourceFormat;
+		dec->sws_dest_format = destFormat;
 		const char* pixName = gApi.av_get_pix_fmt_name(sourceFormat);
 		copyString(dec->pixel_format, sizeof(dec->pixel_format), pixName ? pixName : "unknown");
 	}
@@ -1068,7 +1130,7 @@ static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLin
 
 static int convertFrame(TlavDecoder* dec)
 {
-	return convertFrameToBuffer(dec, NULL, 0);
+	return convertFrameToBuffer(dec, NULL, 0, 0);
 }
 
 static void invalidateRgbaCache(TlavDecoder* dec)
@@ -1092,6 +1154,28 @@ static int copyRgbaCacheToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLi
 	int rowBytes = dec->width * 4;
 	for (int y = 0; y < dec->height; y++) {
 		memcpy(dstBuffer + ((ptrdiff_t)y * dstLineStride), dec->rgba + ((ptrdiff_t)y * rowBytes), (size_t)rowBytes);
+	}
+
+	return 1;
+}
+
+static int copyRgbaCacheToFloatBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride)
+{
+	if (!dec || !dec->rgba || !dstBuffer || dec->width <= 0 || dec->height <= 0) {
+		setError("No cached RGBA frame available");
+		return 0;
+	}
+
+	int srcRowBytes = dec->width * 4;
+	for (int y = 0; y < dec->height; y++) {
+		const uint8_t* src = dec->rgba + ((ptrdiff_t)y * srcRowBytes);
+		float* dst = (float*)(dstBuffer + ((ptrdiff_t)y * dstLineStride));
+		for (int x = 0; x < dec->width; x++) {
+			dst[x * 4 + 0] = (float)src[x * 4 + 0] / 255.0f;
+			dst[x * 4 + 1] = (float)src[x * 4 + 1] / 255.0f;
+			dst[x * 4 + 2] = (float)src[x * 4 + 2] / 255.0f;
+			dst[x * 4 + 3] = (float)src[x * 4 + 3] / 255.0f;
+		}
 	}
 
 	return 1;
@@ -1122,7 +1206,7 @@ TLAV_EXPORT const char* tlav_version(void)
 	}
 
 	static TLAV_THREAD_LOCAL char version[128];
-	snprintf(version, sizeof(version), "bridge 1.2.2, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
+	snprintf(version, sizeof(version), "bridge 1.3.0, libav %s", gApi.av_version_info ? gApi.av_version_info() : "unknown");
 	version[sizeof(version) - 1] = '\0';
 	unlockMutex();
 	return version;
@@ -1183,6 +1267,7 @@ TLAV_EXPORT void* tlav_open(const char* path, TlavInfo* info)
 	dec->current_frame = -1;
 	dec->start_time = AV_NOPTS_VALUE;
 	dec->sws_source_format = AV_PIX_FMT_NONE;
+	dec->sws_dest_format = AV_PIX_FMT_NONE;
 	dec->hw_pix_fmt = AV_PIX_FMT_NONE;
 
 	int ret = gApi.avformat_open_input(&dec->format, path, NULL, NULL);
@@ -1485,9 +1570,12 @@ TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFram
 	}
 }
 
-TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame)
+static int decodeIntoFormat(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame, int outputFormat)
 {
 	clearError();
+	if (outputFormat != 1) {
+		outputFormat = 0;
+	}
 
 	TlavDecoder* dec = (TlavDecoder*)handle;
 	int64_t requestedFrame = frameIndex;
@@ -1507,7 +1595,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		frameIndex = dec->frame_count - 1;
 	}
 
-	if (dec->rgba && frameIndex == dec->current_frame) {
+	if (outputFormat == 0 && dec->rgba && frameIndex == dec->current_frame) {
 		if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
 			setDebug("decode-into cache-copy-failed requested=%lld clamped=%lld error=%s", (long long)requestedFrame, (long long)frameIndex, gLastError);
 			unlockDecoder(dec);
@@ -1526,8 +1614,8 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		return 1;
 	}
 
-	if (!dec->rgba && frameIndex == dec->current_frame) {
-		if (!convertFrameToBuffer(dec, dstBuffer, dstLineStride)) {
+	if (frameIndex == dec->current_frame) {
+		if (!convertFrameToBuffer(dec, dstBuffer, dstLineStride, outputFormat)) {
 			setDebug("decode-into current-frame-convert-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
 				(long long)requestedFrame,
 				(long long)frameIndex,
@@ -1538,7 +1626,8 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		}
 
 		fillDirectOutFrame(dec, outFrame, dstBuffer, dstLineStride, dec->current_frame);
-		setDebug("decode-into current-frame-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d swsRows=%d dst=%p",
+		setDebug("decode-into current-frame-hit format=%s requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d swsRows=%d dst=%p",
+			outputFormatName(outputFormat),
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
@@ -1569,7 +1658,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 	int skippedFrames = 0;
 	while (1) {
 		if (!receiveNextFrame(dec)) {
-			if (dec->rgba) {
+			if (outputFormat == 0 && dec->rgba) {
 				if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
 					setDebug("decode-into eof-cache-copy-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
 						(long long)requestedFrame,
@@ -1621,7 +1710,7 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			continue;
 		}
 
-		if (!convertFrameToBuffer(dec, dstBuffer, dstLineStride)) {
+		if (!convertFrameToBuffer(dec, dstBuffer, dstLineStride, outputFormat)) {
 			setDebug("decode-into convert-failed requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d error=%s",
 				(long long)requestedFrame,
 				(long long)frameIndex,
@@ -1635,10 +1724,13 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 			return 0;
 		}
 
-		invalidateRgbaCache(dec);
+		if (outputFormat == 0) {
+			invalidateRgbaCache(dec);
+		}
 		dec->current_frame = frameIndex;
 		fillDirectOutFrame(dec, outFrame, dstBuffer, dstLineStride, frameIndex);
-		setDebug("decode-into converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
+		setDebug("decode-into converted format=%s requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
+			outputFormatName(outputFormat),
 			(long long)requestedFrame,
 			(long long)frameIndex,
 			(long long)currentBefore,
@@ -1653,6 +1745,16 @@ TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstB
 		unlockDecoder(dec);
 		return 1;
 	}
+}
+
+TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame)
+{
+	return decodeIntoFormat(handle, frameIndex, dstBuffer, dstLineStride, outFrame, 0);
+}
+
+TLAV_EXPORT int tlav_decode_into_format(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame, int outputFormat)
+{
+	return decodeIntoFormat(handle, frameIndex, dstBuffer, dstLineStride, outFrame, outputFormat);
 }
 
 TLAV_EXPORT void tlav_close(void* handle)
