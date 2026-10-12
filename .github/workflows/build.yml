@@ -1,0 +1,163 @@
+# Build the LibAV bridge (libav_bridge) across platforms.
+#
+# Produces per-platform artifacts:
+#   Linux   -> linux_x86_64/*.so
+#   macOS   -> mac_x86_64/*.dylib       (Intel)
+#            mac_arm64/*.dylib          (Apple Silicon)
+#   Windows -> windows_x86_64/*.dll
+
+name: Build LibAV Bridge
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm base-devel ffmpeg pkg-config python luajit
+
+      - name: Build bridge
+        env:
+          TLAV_BUILD_ID: ${{ github.run_id }}
+        run: cd LibAV && bash build_linux.sh
+
+      - name: Test bridge and playback mapping
+        run: |
+          python tests/test_bridge.py LibAV/linux_x86_64/libav_bridge.so /usr/lib
+          luajit tests/test_loader.lua
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libav-bridge-linux-x86_64
+          path: LibAV/linux_x86_64/
+
+  build-macos-x86_64:
+    name: macOS x86_64 (Intel)
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg development headers
+        run: brew install ffmpeg
+
+      - name: Build bridge
+        env:
+          TLAV_BUILD_ID: ${{ github.run_id }}
+        run: cd LibAV && bash build_macos.sh x86_64
+
+      - name: Test bridge
+        run: python3 tests/test_bridge.py LibAV/mac_x86_64/libav_bridge.dylib "$(brew --prefix ffmpeg)/lib"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libav-bridge-macos-x86_64
+          path: LibAV/mac_x86_64/
+
+  build-macos-arm64:
+    name: macOS arm64 (Apple Silicon)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg development headers
+        run: brew install ffmpeg
+
+      - name: Build bridge
+        env:
+          TLAV_BUILD_ID: ${{ github.run_id }}
+        run: cd LibAV && bash build_macos.sh arm64
+
+      - name: Test bridge
+        run: python3 tests/test_bridge.py LibAV/mac_arm64/libav_bridge.dylib "$(brew --prefix ffmpeg)/lib"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libav-bridge-macos-arm64
+          path: LibAV/mac_arm64/
+
+  build-windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install FFmpeg dev headers (gyan.dev)
+        shell: pwsh
+        run: |
+          curl.exe -L -o ffmpeg-dev.7z https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-full-shared.7z
+          7z x ffmpeg-dev.7z -offmpeg_dev
+          $dir = Get-ChildItem -Path ffmpeg_dev -Directory | Select-Object -First 1
+          "FFMPEG_DIR=$($dir.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up MSVC developer command prompt
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build bridge
+        shell: cmd
+        env:
+          TLAV_BUILD_ID: ${{ github.run_id }}
+        run: cd LibAV && call build_windows.bat
+
+      - name: Test bridge
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:FFMPEG_DIR\bin;$env:PATH"
+          python tests/test_bridge.py LibAV/windows_x86_64/libav_bridge.dll "$env:FFMPEG_DIR\bin"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: libav-bridge-windows-x86_64
+          path: LibAV/windows_x86_64/
+
+  commit-binaries:
+    name: Commit bridge binaries
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [build-linux, build-macos-x86_64, build-macos-arm64, build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Place binaries and commit
+        run: |
+          mkdir -p LibAV/linux_x86_64 LibAV/mac_x86_64 LibAV/mac_arm64 LibAV/windows_x86_64
+          cp artifacts/libav-bridge-linux-x86_64/*.so* LibAV/linux_x86_64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-macos-x86_64/*.dylib LibAV/mac_x86_64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-macos-arm64/*.dylib LibAV/mac_arm64/ 2>/dev/null || true
+          cp artifacts/libav-bridge-windows-x86_64/*.dll LibAV/windows_x86_64/ 2>/dev/null || true
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f LibAV/*/libav_bridge.*
+          if git diff --cached --quiet; then
+            echo "No bridge binary changes to commit."
+          else
+            git commit -m "update bridge binaries [skip ci]"
+            git push
+          fi

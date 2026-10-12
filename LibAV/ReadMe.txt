@@ -1,0 +1,76 @@
+Tangenten Loader LibAV bridge
+=============================
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+Copyright (c) 2026 Tangenten.
+
+This folder contains the native bridge used by Loader (FFmpeg). You must
+compile the bridge for your platform using one of the build scripts below.
+The fuse loads the bridge and FFmpeg/libav runtime libraries only from:
+
+  LibAV/<platform>/
+
+Platform folders:
+
+  linux_x86_64
+  windows_x86_64
+  mac_x86_64
+  mac_arm64
+
+The bridge does not bundle FFmpeg/libav. Copy the matching runtime libraries
+for your platform into the same folder as the bridge. The runtime libraries
+MUST match the FFmpeg major version the bridge was built against -- see
+"FFmpeg version requirement" below.
+
+Build scripts (each must run on its own platform; only FFmpeg/libav headers are
+needed at build time, never the import/runtime libraries):
+
+  build_linux.sh              -> linux_x86_64/   (needs pkg-config + ffmpeg dev)
+  build_macos.sh [arch]       -> mac_x86_64/, mac_arm64/   (clang; brew ffmpeg)
+  build_windows.bat           -> windows_x86_64/  (MSVC; set FFMPEG_DIR)
+
+build_macos.sh builds both Intel and Apple Silicon by default; pass `x86_64` or
+`arm64` to build a single slice. build_windows.bat runs from an "x64 Native
+Tools Command Prompt for VS" with FFMPEG_DIR pointing at an FFmpeg dev package
+that has an include\ folder. Each script writes a single bridge file for its
+platform.
+
+FFmpeg version requirement
+--------------------------
+
+The bridge reads FFmpeg data structures directly, so the runtime libraries you
+copy in MUST share the same major (soname) version the bridge was compiled
+against. The official/CI bridge binaries are built against the latest FFmpeg
+release (currently FFmpeg 9.x). Supplying a different major version (for example
+FFmpeg 8.x) reads struct fields at the wrong offsets and shows up as wrong frame
+sizes (e.g. a 1-pixel-wide image) and failed decodes.
+
+If the versions do not match, the tool refuses to decode and shows an
+"FFmpeg ABI mismatch" message in the node's status panel listing the major
+versions it found and the ones it needs. Install runtime libraries with those
+majors and reload the node.
+
+Example runtime library names for the current FFmpeg 9.x bridge build:
+
+  Linux:    libavutil.so.61   libavcodec.so.63   libavformat.so.63
+            libswscale.so.10   libswresample.so.7
+  macOS:    libavutil.61.dylib   libavcodec.63.dylib   libavformat.63.dylib
+            libswscale.10.dylib   libswresample.7.dylib
+  Windows:  avutil-61.dll   avcodec-63.dll   avformat-63.dll
+            swscale-10.dll   swresample-7.dll
+
+Get matching shared builds from your distribution (when it ships that FFmpeg
+release), from the builds linked at ffmpeg.org, or by compiling FFmpeg yourself
+with --enable-shared. The bridge first tries the exact major it was built
+against, then scans the platform folder for matching libav files and tries the
+highest discovered version, then tries the unversioned runtime name
+(libavcodec.so, libavcodec.dylib, avcodec.dll, ...). The major it loads must
+still match the bridge's build headers.
+
+Failure notes
+-------------
+
+If a runtime library is missing, the status message includes the last native
+loader error for the path it tried. If you copy the missing files into the
+platform folder, the bridge unloads partial handles from the failed attempt and
+can retry without restarting Fusion.

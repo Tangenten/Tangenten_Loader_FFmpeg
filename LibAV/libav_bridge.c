@@ -1,0 +1,1856 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ *
+ * Copyright (c) 2026 Tangenten.
+ *
+ * Tangenten LibAV bridge for Loader_FFmpeg.
+ *
+ * The bridge owns FFmpeg/libav decoder state and exposes a compact ABI for
+ * LuaJIT FFI. It loads libav libraries from the fuse-local platform folder
+ * only; it does not link against libav at build time.
+ */
+
+#include <errno.h>
+#include <limits.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <libavcodec/avcodec.h>
+#include <libavformat/avformat.h>
+#include <libavutil/avutil.h>
+#include <libavutil/pixdesc.h>
+#include <libavutil/hwcontext.h>
+#include <libswscale/swscale.h>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <dirent.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#endif
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* Build identifier injected by CI so every run produces a unique binary. */
+#ifndef TLAV_BUILD_ID
+#define TLAV_BUILD_ID "dev"
+#endif
+
+/* Export the public ABI. On Windows nothing is exported from a DLL by default;
+ * elsewhere symbols already default to visible, so this is a no-op. */
+#ifdef _WIN32
+#define TLAV_EXPORT __declspec(dllexport)
+#else
+#define TLAV_EXPORT
+#endif
+
+typedef struct TlavInfo {
+	int width;
+	int height;
+	double fps;
+	int64_t frame_count;
+	double duration;
+	char codec_name[64];
+	char pixel_format[64];
+	char format_name[128];
+} TlavInfo;
+
+typedef struct TlavFrame {
+	const uint8_t* data;
+	int width;
+	int height;
+	int stride;
+	int64_t frame_index;
+} TlavFrame;
+
+typedef struct TlavApi {
+	void* avutil;
+	void* avcodec;
+	void* avformat;
+	void* swscale;
+	void* swresample;
+
+	const char* (*av_version_info)(void);
+	int (*av_strerror)(int errnum, char* errbuf, size_t errbuf_size);
+	const char* (*av_get_pix_fmt_name)(enum AVPixelFormat pix_fmt);
+	const AVPixFmtDescriptor* (*av_pix_fmt_desc_get)(enum AVPixelFormat pix_fmt);
+
+	/* Runtime soname-major reporters, used to reject ABI-incompatible libs. */
+	unsigned (*avutil_version)(void);
+	unsigned (*avcodec_version)(void);
+	unsigned (*avformat_version)(void);
+	unsigned (*swscale_version)(void);
+
+	int (*avformat_open_input)(AVFormatContext** ps, const char* url, const AVInputFormat* fmt, AVDictionary** options);
+	int (*avformat_find_stream_info)(AVFormatContext* ic, AVDictionary** options);
+	void (*avformat_close_input)(AVFormatContext** s);
+	int (*av_find_best_stream)(AVFormatContext* ic, enum AVMediaType type, int wanted_stream_nb, int related_stream, const AVCodec** decoder_ret, int flags);
+	int (*av_read_frame)(AVFormatContext* s, AVPacket* pkt);
+	int (*av_seek_frame)(AVFormatContext* s, int stream_index, int64_t timestamp, int flags);
+
+	const AVCodec* (*avcodec_find_decoder)(enum AVCodecID id);
+	AVCodecContext* (*avcodec_alloc_context3)(const AVCodec* codec);
+	int (*avcodec_parameters_to_context)(AVCodecContext* codec, const AVCodecParameters* par);
+	int (*avcodec_open2)(AVCodecContext* avctx, const AVCodec* codec, AVDictionary** options);
+	void (*avcodec_free_context)(AVCodecContext** avctx);
+	int (*avcodec_send_packet)(AVCodecContext* avctx, const AVPacket* avpkt);
+	int (*avcodec_receive_frame)(AVCodecContext* avctx, AVFrame* frame);
+	void (*avcodec_flush_buffers)(AVCodecContext* avctx);
+	const char* (*avcodec_get_name)(enum AVCodecID id);
+	AVPacket* (*av_packet_alloc)(void);
+	void (*av_packet_free)(AVPacket** pkt);
+	void (*av_packet_unref)(AVPacket* pkt);
+
+	AVFrame* (*av_frame_alloc)(void);
+	void (*av_frame_free)(AVFrame** frame);
+
+	struct SwsContext* (*sws_getContext)(int srcW, int srcH, enum AVPixelFormat srcFormat, int dstW, int dstH, enum AVPixelFormat dstFormat, int flags, SwsFilter* srcFilter, SwsFilter* dstFilter, const double* param);
+	const int* (*sws_getCoefficients)(int colorspace);
+	int (*sws_setColorspaceDetails)(struct SwsContext*, const int*, int, const int*, int, int, int, int);
+	int (*sws_scale)(struct SwsContext* c, const uint8_t* const srcSlice[], const int srcStride[], int srcSliceY, int srcSliceH, uint8_t* const dst[], const int dstStride[]);
+	void (*sws_freeContext)(struct SwsContext* swsContext);
+
+	/* Optional hardware-decode symbols; absent on older libav builds. */
+	int hwSupported;
+	const AVCodecHWConfig* (*avcodec_get_hw_config)(const AVCodec* codec, int index);
+	int (*av_hwdevice_ctx_create)(AVBufferRef** device_ctx, enum AVHWDeviceType type, const char* device, AVDictionary* opts, int flags);
+	int (*av_hwframe_transfer_data)(AVFrame* dst, const AVFrame* src, int flags);
+	AVBufferRef* (*av_buffer_ref)(AVBufferRef* buf);
+	void (*av_buffer_unref)(AVBufferRef** buf);
+	void (*av_frame_unref)(AVFrame* frame);
+	const char* (*av_hwdevice_get_type_name)(enum AVHWDeviceType type);
+} TlavApi;
+
+typedef struct TlavDecoder {
+#ifdef _WIN32
+	CRITICAL_SECTION mutex;
+#else
+	pthread_mutex_t mutex;
+#endif
+	int mutex_initialized;
+	AVFormatContext* format;
+	AVCodecContext* codec;
+	const AVCodec* decoder;
+	AVStream* stream;
+	AVFrame* frame;
+	AVPacket* packet;
+	struct SwsContext* sws;
+	AVBufferRef* hw_device_ctx;
+	AVFrame* sw_frame;
+	enum AVPixelFormat hw_pix_fmt;
+	enum AVHWDeviceType hw_type;
+	int using_hw;
+	char hw_name[64];
+	uint8_t* rgba;
+	int rgba_size;
+	int rgba_valid;
+	int frame_valid;
+	uint16_t* float_staging;
+	size_t float_staging_size;
+	int width;
+	int height;
+	int last_scaled_rows;
+	int sws_source_width;
+	int sws_source_height;
+	int sws_dest_width;
+	int sws_dest_height;
+	enum AVPixelFormat sws_source_format;
+	enum AVPixelFormat sws_dest_format;
+	int stream_index;
+	double fps;
+	double duration;
+	int64_t frame_count;
+	int64_t current_frame;
+	int index_pending;
+	int draining;
+	int64_t start_time;
+	AVRational time_base;
+	char codec_name[64];
+	char pixel_format[64];
+	char format_name[128];
+} TlavDecoder;
+
+static TlavApi gApi;
+static int gApiLoaded = 0;
+static char gLibraryDir[PATH_MAX] = {0};
+
+#ifdef _MSC_VER
+#define TLAV_THREAD_LOCAL __declspec(thread)
+#else
+#define TLAV_THREAD_LOCAL __thread
+#endif
+
+static TLAV_THREAD_LOCAL char gLastError[1024] = {0};
+static TLAV_THREAD_LOCAL char gLastDebug[2048] = {0};
+static TLAV_THREAD_LOCAL char gLastLoadError[1024] = {0};
+
+#ifdef _WIN32
+static SRWLOCK gMutex = SRWLOCK_INIT;
+static void lockMutex(void)
+{
+	AcquireSRWLockExclusive(&gMutex);
+}
+static void unlockMutex(void)
+{
+	ReleaseSRWLockExclusive(&gMutex);
+}
+#else
+static pthread_mutex_t gMutex = PTHREAD_MUTEX_INITIALIZER;
+static void lockMutex(void)
+{
+	pthread_mutex_lock(&gMutex);
+}
+static void unlockMutex(void)
+{
+	pthread_mutex_unlock(&gMutex);
+}
+#endif
+
+static int initDecoderMutex(TlavDecoder* dec)
+{
+	if (!dec) {
+		return 0;
+	}
+
+#ifdef _WIN32
+	InitializeCriticalSection(&dec->mutex);
+#else
+	if (pthread_mutex_init(&dec->mutex, NULL) != 0) {
+		return 0;
+	}
+#endif
+	dec->mutex_initialized = 1;
+	return 1;
+}
+
+static void lockDecoder(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	EnterCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_lock(&dec->mutex);
+#endif
+}
+
+static void unlockDecoder(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	LeaveCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_unlock(&dec->mutex);
+#endif
+}
+
+static void destroyDecoderMutex(TlavDecoder* dec)
+{
+	if (!dec || !dec->mutex_initialized) {
+		return;
+	}
+
+#ifdef _WIN32
+	DeleteCriticalSection(&dec->mutex);
+#else
+	pthread_mutex_destroy(&dec->mutex);
+#endif
+	dec->mutex_initialized = 0;
+}
+
+static void setError(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(gLastError, sizeof(gLastError), fmt, args);
+	gLastError[sizeof(gLastError) - 1] = '\0';
+	va_end(args);
+}
+
+static void clearError(void)
+{
+	gLastError[0] = '\0';
+}
+
+static void setLoadError(const char* path)
+{
+#ifdef _WIN32
+	DWORD err = GetLastError();
+	char msg[768] = {0};
+	FormatMessageA(
+		FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+		NULL,
+		err,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+		msg,
+		(DWORD)sizeof(msg),
+		NULL);
+	snprintf(gLastLoadError, sizeof(gLastLoadError), "%s: %s", path, msg[0] ? msg : "unknown loader error");
+#else
+	const char* err = dlerror();
+	snprintf(gLastLoadError, sizeof(gLastLoadError), "%s: %s", path, err ? err : "unknown loader error");
+#endif
+	gLastLoadError[sizeof(gLastLoadError) - 1] = '\0';
+}
+
+static void setDebug(const char* fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(gLastDebug, sizeof(gLastDebug), fmt, args);
+	gLastDebug[sizeof(gLastDebug) - 1] = '\0';
+	va_end(args);
+}
+
+static void copyString(char* dst, size_t dstSize, const char* src)
+{
+	if (dstSize == 0) {
+		return;
+	}
+
+	if (!src) {
+		dst[0] = '\0';
+		return;
+	}
+
+	snprintf(dst, dstSize, "%s", src);
+	dst[dstSize - 1] = '\0';
+}
+
+static double rationalToDouble(AVRational r)
+{
+	if (r.den == 0 || r.num == 0) {
+		return 0.0;
+	}
+
+	return (double)r.num / (double)r.den;
+}
+
+static int64_t roundDoubleToInt64(double value)
+{
+	if (value < 0.0) {
+		return (int64_t)(value - 0.5);
+	}
+
+	return (int64_t)(value + 0.5);
+}
+
+static void formatAvError(int err, char* dst, size_t dstSize)
+{
+	if (gApi.av_strerror && gApi.av_strerror(err, dst, dstSize) == 0) {
+		dst[dstSize - 1] = '\0';
+		return;
+	}
+
+	snprintf(dst, dstSize, "FFmpeg error %d", err);
+	dst[dstSize - 1] = '\0';
+}
+
+static void joinPath(char* dst, size_t dstSize, const char* dir, const char* fileName)
+{
+	if (dstSize == 0) return;
+	size_t dirLen = strlen(dir);
+	int needSep = dirLen > 0 && dir[dirLen - 1] != '/' && dir[dirLen - 1] != '\\';
+#ifdef _WIN32
+	int ret = snprintf(dst, dstSize, "%s%s%s", dir, needSep ? "\\" : "", fileName);
+#else
+	int ret = snprintf(dst, dstSize, "%s%s%s", dir, needSep ? "/" : "", fileName);
+#endif
+	if (ret < 0 || (size_t)ret >= dstSize) dst[dstSize - 1] = '\0';
+}
+
+/* Build runtime file names from the library root. The exact name prefers the
+ * major this bridge was built against; the plain name lets package symlinks or
+ * unversioned DLLs select the installed runtime without hardcoded major lists. */
+static void exactLibName(char* dst, size_t dstSize, const char* libRoot, int major)
+{
+#ifdef _WIN32
+	snprintf(dst, dstSize, "%s-%d.dll", libRoot, major);
+#elif defined(__APPLE__)
+	snprintf(dst, dstSize, "lib%s.%d.dylib", libRoot, major);
+#else
+	snprintf(dst, dstSize, "lib%s.so.%d", libRoot, major);
+#endif
+	dst[dstSize - 1] = '\0';
+}
+
+static void plainLibName(char* dst, size_t dstSize, const char* libRoot)
+{
+#ifdef _WIN32
+	snprintf(dst, dstSize, "%s.dll", libRoot);
+#elif defined(__APPLE__)
+	snprintf(dst, dstSize, "lib%s.dylib", libRoot);
+#else
+	snprintf(dst, dstSize, "lib%s.so", libRoot);
+#endif
+	dst[dstSize - 1] = '\0';
+}
+
+static void* loadSharedObject(const char* path)
+{
+#ifdef _WIN32
+	wchar_t widePath[PATH_MAX];
+	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, widePath, PATH_MAX)) {
+		setLoadError(path);
+		return NULL;
+	}
+	void* handle = (void*)LoadLibraryExW(widePath, NULL,
+		LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+#else
+	dlerror();
+	void* handle = dlopen(path, RTLD_NOW | RTLD_GLOBAL);
+#endif
+	if (!handle) {
+		setLoadError(path);
+	}
+	return handle;
+}
+
+static void unloadSharedObject(void* handle)
+{
+	if (!handle) {
+		return;
+	}
+
+#ifdef _WIN32
+	FreeLibrary((HMODULE)handle);
+#else
+	dlclose(handle);
+#endif
+}
+
+static void* loadSymbol(void* handle, const char* symbolName)
+{
+#ifdef _WIN32
+	return (void*)GetProcAddress((HMODULE)handle, symbolName);
+#else
+	return dlsym(handle, symbolName);
+#endif
+}
+
+/* ---- Dynamic library discovery ---- */
+
+#ifdef _WIN32
+/* Extract version from "avcodec-<major>.dll", or -1. */
+static int dllVersion(const char* name)
+{
+	const char* dot = strrchr(name, '.');
+	if (!dot) return -1;
+	const char* dash = NULL;
+	for (const char* p = name; p < dot; p++) {
+		if (*p == '-') dash = p;
+	}
+	if (!dash) return -1;
+	return atoi(dash + 1);
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "%s-", lib);
+	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dll");
+}
+#elif defined(__APPLE__)
+/* Extract version from "libavutil.<major>.dylib", or -1. */
+static int dylibVersion(const char* name)
+{
+	const char* prevDot = strchr(name, '.');
+	if (!prevDot) return -1;
+	char buf[32];
+	const char* end = strchr(prevDot + 1, '.');
+	if (!end) return -1;
+	size_t len = (size_t)(end - prevDot - 1);
+	if (len >= sizeof(buf)) return -1;
+	memcpy(buf, prevDot + 1, len);
+	buf[len] = '\0';
+	int v = atoi(buf);
+	return v > 0 ? v : -1;
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "lib%s.", lib);
+	return strncmp(name, pat, strlen(pat)) == 0 && strstr(name, ".dylib");
+}
+#else
+/* Extract version from "libavutil.so.<major>", or -1. */
+static int soVersion(const char* name)
+{
+	const char* marker = strstr(name, ".so.");
+	if (!marker) return -1;
+	int v = atoi(marker + 4);
+	return v > 0 ? v : -1;
+}
+static int matchLibrary(const char* name, const char* lib) {
+	char pat[64];
+	snprintf(pat, sizeof(pat), "lib%s.", lib);
+	return strncmp(name, pat, strlen(pat)) == 0;
+}
+#endif
+
+/* d_name can be up to NAME_MAX (typically 255 + NUL). */
+struct LibEntry { char name[256]; int version; };
+
+static int entrySortDesc(const void* a, const void* b) {
+	return ((const struct LibEntry*)b)->version - ((const struct LibEntry*)a)->version;
+}
+
+/* Scan gLibraryDir for files matching library <lib>, return sorted entries. */
+static int scanLibraries(const char* lib, struct LibEntry* entries, int max)
+{
+	int count = 0;
+#ifdef _WIN32
+	char pattern[PATH_MAX];
+	snprintf(pattern, sizeof(pattern), "%s\\%s-*.dll", gLibraryDir, lib);
+	wchar_t widePattern[PATH_MAX];
+	if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, widePattern, PATH_MAX)) return 0;
+	WIN32_FIND_DATAW ffd;
+	HANDLE hFind = FindFirstFileW(widePattern, &ffd);
+	if (hFind == INVALID_HANDLE_VALUE) return 0;
+	do {
+		if (count >= max) break;
+		if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+		if (!WideCharToMultiByte(CP_UTF8, 0, ffd.cFileName, -1, entries[count].name,
+			(int)sizeof(entries[count].name), NULL, NULL)) continue;
+		entries[count].version = dllVersion(entries[count].name);
+		count++;
+	} while (FindNextFileW(hFind, &ffd) != 0);
+	FindClose(hFind);
+#else
+	DIR* d = opendir(gLibraryDir);
+	if (!d) return 0;
+	struct dirent* entry;
+	while ((entry = readdir(d)) != NULL && count < max) {
+		if (!matchLibrary(entry->d_name, lib)) continue;
+		snprintf(entries[count].name, sizeof(entries[count].name), "%s", entry->d_name);
+		entries[count].version =
+#ifdef __APPLE__
+			dylibVersion(entry->d_name);
+#else
+			soVersion(entry->d_name);
+#endif
+		count++;
+	}
+	closedir(d);
+#endif
+	if (count > 1) qsort(entries, (size_t)count, sizeof(struct LibEntry), entrySortDesc);
+	return count;
+}
+
+/* Try to load a library, preferring the exact major this bridge was built
+ * against, then the highest discovered file, then the unversioned name. */
+static void* loadLibrary(const char* label, const char* libRoot, int preferredMajor)
+{
+	char path[PATH_MAX];
+	gLastLoadError[0] = '\0';
+
+	if (preferredMajor > 0) {
+		char exact[64];
+		exactLibName(exact, sizeof(exact), libRoot, preferredMajor);
+		joinPath(path, sizeof(path), gLibraryDir, exact);
+		void* handle = loadSharedObject(path);
+		if (handle) return handle;
+	}
+
+	struct LibEntry entries[32];
+	int n = scanLibraries(libRoot, entries, 32);
+	if (n > 0) {
+		for (int i = 0; i < n; i++) {
+			joinPath(path, sizeof(path), gLibraryDir, entries[i].name);
+			void* handle = loadSharedObject(path);
+			if (handle) return handle;
+		}
+	}
+	char plain[64];
+	plainLibName(plain, sizeof(plain), libRoot);
+	joinPath(path, sizeof(path), gLibraryDir, plain);
+	void* handle = loadSharedObject(path);
+	if (handle) return handle;
+
+	if (gLastLoadError[0] != '\0') {
+		setError("Missing %s in %s. Last loader error: %s", label, gLibraryDir, gLastLoadError);
+	} else {
+		setError("Missing %s in %s", label, gLibraryDir);
+	}
+	return NULL;
+}
+
+static int failLoadApi(void)
+{
+	unloadSharedObject(gApi.swscale);
+	unloadSharedObject(gApi.avformat);
+	unloadSharedObject(gApi.avcodec);
+	unloadSharedObject(gApi.swresample);
+	unloadSharedObject(gApi.avutil);
+	memset(&gApi, 0, sizeof(gApi));
+	gApiLoaded = 0;
+	return 0;
+}
+
+static int loadRequiredSymbol(void* handle, const char* symbolName, void** dst)
+{
+	*dst = loadSymbol(handle, symbolName);
+	if (!*dst) {
+		setError("Missing symbol %s", symbolName);
+		return 0;
+	}
+
+	return 1;
+}
+
+#define LOAD_SYMBOL(handle, name) \
+	do { \
+		if (!loadRequiredSymbol((handle), #name, (void**)&gApi.name)) { \
+			return failLoadApi(); \
+		} \
+	} while (0)
+
+static void loadOptionalSymbol(void* handle, const char* symbolName, void** dst)
+{
+	*dst = loadSymbol(handle, symbolName);
+}
+
+#define LOAD_OPTIONAL(handle, name) \
+	loadOptionalSymbol((handle), #name, (void**)&gApi.name)
+
+/* libav packs the soname major into the high 8 bits of the version word. */
+static int avMajor(unsigned version)
+{
+	return (int)((version >> 16) & 0xff);
+}
+
+/* Map a libavcodec soname major to its FFmpeg release for human-readable errors. */
+static int ffmpegReleaseFromAvcodecMajor(int avcodecMajor)
+{
+	switch (avcodecMajor) {
+		case 63: return 9;
+		case 62: return 8;
+		case 61: return 7;
+		case 60: return 6;
+		case 59: return 5;
+		case 58: return 4;
+		default: return 0;
+	}
+}
+
+/*
+ * The bridge reads libav structs (AVCodecContext, AVFrame, ...) by field, so it
+ * is only ABI-compatible with the FFmpeg major it was compiled against. The
+ * loader will happily open a different major, which then reads fields at the
+ * wrong offsets (garbage sizes, failed decodes). Reject any major mismatch here
+ * with an actionable message instead of corrupting output downstream.
+ */
+static int checkLibavVersions(void)
+{
+	struct VersionCheck {
+		const char* name;
+		unsigned (*fn)(void);
+		int expected;
+	} checks[4] = {
+		{"libavutil", gApi.avutil_version, LIBAVUTIL_VERSION_MAJOR},
+		{"libavcodec", gApi.avcodec_version, LIBAVCODEC_VERSION_MAJOR},
+		{"libavformat", gApi.avformat_version, LIBAVFORMAT_VERSION_MAJOR},
+		{"libswscale", gApi.swscale_version, LIBSWSCALE_VERSION_MAJOR},
+	};
+
+	char detail[512];
+	size_t off = 0;
+	int bad = 0;
+	for (int i = 0; i < 4; i++) {
+		int got = checks[i].fn ? avMajor(checks[i].fn()) : -1;
+		if (got == checks[i].expected) {
+			continue;
+		}
+		bad++;
+		int written = snprintf(detail + off, sizeof(detail) - off, "%s%s major %d (need %d)",
+			off ? ", " : "", checks[i].name, got, checks[i].expected);
+		if (written < 0) break;
+		off += (size_t)written;
+		if (off >= sizeof(detail)) { off = sizeof(detail) - 1; break; }
+	}
+
+	if (bad) {
+		int release = ffmpegReleaseFromAvcodecMajor(LIBAVCODEC_VERSION_MAJOR);
+		if (release > 0) {
+			setError("FFmpeg ABI mismatch: %s. This bridge needs FFmpeg %d.x runtime libraries; copy matching libav*/libsw* files into %s.",
+				detail, release, gLibraryDir);
+		} else {
+			setError("FFmpeg ABI mismatch: %s. Copy runtime libraries matching this bridge build into %s.",
+				detail, gLibraryDir);
+		}
+		setDebug("version-mismatch %s", detail);
+		return 0;
+	}
+
+	setDebug("version-ok avutil=%d avcodec=%d avformat=%d swscale=%d",
+		avMajor(gApi.avutil_version()), avMajor(gApi.avcodec_version()),
+		avMajor(gApi.avformat_version()), avMajor(gApi.swscale_version()));
+	return 1;
+}
+
+static int loadApi(void)
+{
+	if (gApiLoaded) {
+		return 1;
+	}
+
+	if (gLibraryDir[0] == '\0') {
+		setError("LibAV library directory was not configured");
+		return 0;
+	}
+
+	memset(&gApi, 0, sizeof(gApi));
+	gApi.avutil = loadLibrary("libavutil", "avutil", LIBAVUTIL_VERSION_MAJOR);
+	if (!gApi.avutil) return failLoadApi();
+	gApi.swresample = loadLibrary("libswresample", "swresample", 0);
+	if (!gApi.swresample) return failLoadApi();
+	gApi.avcodec = loadLibrary("libavcodec", "avcodec", LIBAVCODEC_VERSION_MAJOR);
+	if (!gApi.avcodec) return failLoadApi();
+	gApi.avformat = loadLibrary("libavformat", "avformat", LIBAVFORMAT_VERSION_MAJOR);
+	if (!gApi.avformat) return failLoadApi();
+	gApi.swscale = loadLibrary("libswscale", "swscale", LIBSWSCALE_VERSION_MAJOR);
+	if (!gApi.swscale) return failLoadApi();
+
+	/* Reject ABI-incompatible majors before any struct field is read. */
+	LOAD_SYMBOL(gApi.avutil, avutil_version);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_version);
+	LOAD_SYMBOL(gApi.avformat, avformat_version);
+	LOAD_SYMBOL(gApi.swscale, swscale_version);
+	if (!checkLibavVersions()) {
+		return failLoadApi();
+	}
+
+	LOAD_SYMBOL(gApi.avutil, av_version_info);
+	LOAD_SYMBOL(gApi.avutil, av_strerror);
+	LOAD_SYMBOL(gApi.avutil, av_get_pix_fmt_name);
+	LOAD_SYMBOL(gApi.avutil, av_pix_fmt_desc_get);
+
+	LOAD_SYMBOL(gApi.avformat, avformat_open_input);
+	LOAD_SYMBOL(gApi.avformat, avformat_find_stream_info);
+	LOAD_SYMBOL(gApi.avformat, avformat_close_input);
+	LOAD_SYMBOL(gApi.avformat, av_find_best_stream);
+	LOAD_SYMBOL(gApi.avformat, av_read_frame);
+	LOAD_SYMBOL(gApi.avformat, av_seek_frame);
+
+	LOAD_SYMBOL(gApi.avcodec, avcodec_find_decoder);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_alloc_context3);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_parameters_to_context);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_open2);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_free_context);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_send_packet);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_receive_frame);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_flush_buffers);
+	LOAD_SYMBOL(gApi.avcodec, avcodec_get_name);
+	LOAD_SYMBOL(gApi.avcodec, av_packet_alloc);
+	LOAD_SYMBOL(gApi.avcodec, av_packet_free);
+	LOAD_SYMBOL(gApi.avcodec, av_packet_unref);
+
+	LOAD_SYMBOL(gApi.avutil, av_frame_alloc);
+	LOAD_SYMBOL(gApi.avutil, av_frame_free);
+
+	LOAD_SYMBOL(gApi.swscale, sws_getContext);
+	LOAD_SYMBOL(gApi.swscale, sws_scale);
+	LOAD_SYMBOL(gApi.swscale, sws_getCoefficients);
+	LOAD_SYMBOL(gApi.swscale, sws_setColorspaceDetails);
+	LOAD_SYMBOL(gApi.swscale, sws_freeContext);
+
+	LOAD_OPTIONAL(gApi.avcodec, avcodec_get_hw_config);
+	LOAD_OPTIONAL(gApi.avutil, av_hwdevice_ctx_create);
+	LOAD_OPTIONAL(gApi.avutil, av_hwframe_transfer_data);
+	LOAD_OPTIONAL(gApi.avutil, av_buffer_ref);
+	LOAD_OPTIONAL(gApi.avutil, av_buffer_unref);
+	LOAD_OPTIONAL(gApi.avutil, av_frame_unref);
+	LOAD_OPTIONAL(gApi.avutil, av_hwdevice_get_type_name);
+	gApi.hwSupported = gApi.avcodec_get_hw_config && gApi.av_hwdevice_ctx_create
+		&& gApi.av_hwframe_transfer_data && gApi.av_buffer_ref
+		&& gApi.av_buffer_unref && gApi.av_frame_unref;
+
+	gApiLoaded = 1;
+	clearError();
+	return 1;
+}
+
+/*
+ * get_format callback: pick our hardware pixel format if the decoder offers it.
+ * Called by the decoder while configuring; dec is reached through ctx->opaque.
+ */
+static enum AVPixelFormat selectHwFormat(AVCodecContext* ctx, const enum AVPixelFormat* formats)
+{
+	TlavDecoder* dec = ctx ? (TlavDecoder*)ctx->opaque : NULL;
+	if (dec && dec->using_hw) {
+		for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; p++) {
+			if (*p == dec->hw_pix_fmt) {
+				return *p;
+			}
+		}
+		setDebug("hw format %d not offered by decoder; using software", (int)dec->hw_pix_fmt);
+	}
+
+	for (const enum AVPixelFormat* p = formats; *p != AV_PIX_FMT_NONE; p++) {
+		const AVPixFmtDescriptor* desc = gApi.av_pix_fmt_desc_get(*p);
+		if (desc && !(desc->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
+			if (dec) dec->using_hw = 0;
+			return *p;
+		}
+	}
+	return AV_PIX_FMT_NONE;
+}
+
+/*
+ * Try to attach a hardware device the decoder can use. Walks the decoder's
+ * advertised hw configs and keeps the first device that actually creates,
+ * which makes the selection codec- and platform-agnostic (VAAPI, CUDA,
+ * VideoToolbox, D3D11VA, ...). Leaves the decoder in software mode on failure.
+ */
+static void setupHardware(TlavDecoder* dec)
+{
+	if (!gApi.hwSupported || !dec || !dec->decoder || !dec->codec) {
+		return;
+	}
+
+	for (int i = 0;; i++) {
+		const AVCodecHWConfig* config = gApi.avcodec_get_hw_config(dec->decoder, i);
+		if (!config) {
+			setDebug("hw none usable for codec %s", dec->decoder->name ? dec->decoder->name : "?");
+			return;
+		}
+		if (!(config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)) {
+			continue;
+		}
+
+		AVBufferRef* hwctx = NULL;
+		int ret = gApi.av_hwdevice_ctx_create(&hwctx, config->device_type, NULL, NULL, 0);
+		if (ret < 0 || !hwctx) {
+			continue;
+		}
+
+		AVFrame* swFrame = gApi.av_frame_alloc();
+		if (!swFrame) {
+			gApi.av_buffer_unref(&hwctx);
+			return;
+		}
+
+		AVBufferRef* codecHwctx = gApi.av_buffer_ref(hwctx);
+		if (!codecHwctx) {
+			gApi.av_frame_free(&swFrame);
+			gApi.av_buffer_unref(&hwctx);
+			return;
+		}
+		dec->hw_device_ctx = hwctx;
+		dec->sw_frame = swFrame;
+		dec->hw_pix_fmt = config->pix_fmt;
+		dec->hw_type = config->device_type;
+		dec->codec->hw_device_ctx = codecHwctx;
+		dec->codec->opaque = dec;
+		dec->codec->get_format = selectHwFormat;
+		dec->using_hw = 1;
+		copyString(dec->hw_name, sizeof(dec->hw_name),
+			gApi.av_hwdevice_get_type_name ? gApi.av_hwdevice_get_type_name(config->device_type) : "hardware");
+		setDebug("hw enabled type=%s pix=%d codec=%s", dec->hw_name, (int)dec->hw_pix_fmt, dec->decoder->name ? dec->decoder->name : "?");
+		return;
+	}
+}
+
+static void freeDecoderResources(TlavDecoder* dec)
+{
+	if (!dec) {
+		return;
+	}
+
+	if (dec->sws && gApi.sws_freeContext) {
+		gApi.sws_freeContext(dec->sws);
+	}
+	free(dec->float_staging);
+	if (dec->rgba) {
+		free(dec->rgba);
+	}
+	if (dec->sw_frame && gApi.av_frame_free) {
+		gApi.av_frame_free(&dec->sw_frame);
+	}
+	if (dec->frame && gApi.av_frame_free) {
+		gApi.av_frame_free(&dec->frame);
+	}
+	if (dec->packet && gApi.av_packet_free) {
+		gApi.av_packet_free(&dec->packet);
+	}
+	if (dec->codec && gApi.avcodec_free_context) {
+		gApi.avcodec_free_context(&dec->codec);
+	}
+	if (dec->hw_device_ctx && gApi.av_buffer_unref) {
+		gApi.av_buffer_unref(&dec->hw_device_ctx);
+	}
+	if (dec->format && gApi.avformat_close_input) {
+		gApi.avformat_close_input(&dec->format);
+	}
+}
+
+static void closeDecoder(TlavDecoder* dec)
+{
+	if (!dec) {
+		return;
+	}
+
+	lockDecoder(dec);
+	freeDecoderResources(dec);
+	unlockDecoder(dec);
+	destroyDecoderMutex(dec);
+	free(dec);
+}
+
+static int fillInfo(TlavDecoder* dec, TlavInfo* info)
+{
+	if (!dec || !info) {
+		return 0;
+	}
+
+	info->width = dec->width;
+	info->height = dec->height;
+	info->fps = dec->fps;
+	info->frame_count = dec->frame_count;
+	info->duration = dec->duration;
+	copyString(info->codec_name, sizeof(info->codec_name), dec->codec_name);
+	copyString(info->pixel_format, sizeof(info->pixel_format), dec->pixel_format);
+	copyString(info->format_name, sizeof(info->format_name), dec->format_name);
+	return 1;
+}
+
+static int seekDecoder(TlavDecoder* dec, int64_t targetFrame)
+{
+	if (!dec) {
+		setError("Decoder handle is null");
+		return 0;
+	}
+
+	if (targetFrame < 0) {
+		targetFrame = 0;
+	}
+
+	double tb = rationalToDouble(dec->time_base);
+	int64_t ts = 0;
+	if (tb > 0.0 && dec->fps > 0.0) {
+		double seconds = (double)targetFrame / dec->fps;
+		ts = roundDoubleToInt64(seconds / tb);
+		if (dec->start_time != AV_NOPTS_VALUE) {
+			ts += dec->start_time;
+		}
+	}
+
+	int ret = gApi.av_seek_frame(dec->format, dec->stream_index, ts, AVSEEK_FLAG_BACKWARD);
+	if (ret < 0) {
+		char err[256];
+		formatAvError(ret, err, sizeof(err));
+		setError("Seek failed for frame %lld: %s", (long long)targetFrame, err);
+		return 0;
+	}
+
+	gApi.avcodec_flush_buffers(dec->codec);
+	dec->current_frame = targetFrame > 0 ? targetFrame - 1 : -1;
+	dec->rgba_valid = 0;
+	dec->frame_valid = 0;
+	dec->index_pending = 1;
+	dec->draining = 0;
+	return 1;
+}
+
+static int receiveNextFrame(TlavDecoder* dec)
+{
+	dec->rgba_valid = 0;
+	dec->frame_valid = 0;
+	while (1) {
+		int ret = gApi.avcodec_receive_frame(dec->codec, dec->frame);
+		if (ret == 0) {
+			dec->frame_valid = 1;
+			return 1;
+		}
+		if (ret == AVERROR_EOF) {
+			return 0;
+		}
+		if (ret != AVERROR(EAGAIN)) {
+			char err[256];
+			formatAvError(ret, err, sizeof(err));
+			setError("Decode failed: %s", err);
+			return 0;
+		}
+		if (dec->draining) {
+			return 0;
+		}
+
+		while (1) {
+			ret = gApi.av_read_frame(dec->format, dec->packet);
+			if (ret < 0) {
+				if (ret != AVERROR_EOF) {
+					char err[256];
+					formatAvError(ret, err, sizeof(err));
+					setError("Could not read packet: %s", err);
+					return 0;
+				}
+				ret = gApi.avcodec_send_packet(dec->codec, NULL);
+				if (ret < 0 && ret != AVERROR_EOF) {
+					setError("Could not drain decoder: %d", ret);
+					return 0;
+				}
+				dec->draining = 1;
+				break;
+			}
+
+			if (dec->packet->stream_index != dec->stream_index) {
+				gApi.av_packet_unref(dec->packet);
+				continue;
+			}
+
+			ret = gApi.avcodec_send_packet(dec->codec, dec->packet);
+			gApi.av_packet_unref(dec->packet);
+			if (ret < 0) {
+				char err[256];
+				formatAvError(ret, err, sizeof(err));
+				setError("Could not send packet to decoder: %s", err);
+				return 0;
+			}
+			break;
+		}
+	}
+}
+
+static int estimateFrameIndex(TlavDecoder* dec, int64_t* outIndex)
+{
+	int64_t ts = dec->frame->best_effort_timestamp;
+	if (ts == AV_NOPTS_VALUE) {
+		ts = dec->frame->pts;
+	}
+
+	if (ts != AV_NOPTS_VALUE && dec->fps > 0.0) {
+		int64_t start = dec->start_time == AV_NOPTS_VALUE ? 0 : dec->start_time;
+		double seconds = (double)(ts - start) * rationalToDouble(dec->time_base);
+		double framePosition = seconds * dec->fps;
+		/* A timestamp belongs to the frame interval that starts at its
+		 * index. Rounding can classify the end of frame N as N+1, causing
+		 * the decode loop to return a future frame while labelling it N. */
+		if (framePosition >= 0.0) {
+			int64_t idx = (int64_t)framePosition;
+			*outIndex = idx;
+			return 1;
+		}
+	}
+
+	*outIndex = dec->current_frame + 1;
+	return 0;
+}
+
+static int validLayout(int width, int height, int stride, int format, const void* buffer)
+{
+	int pixelBytes = format == 1 ? 16 : (format == 2 ? 8 : 4);
+	int64_t rowBytes = (int64_t)width * pixelBytes;
+	int64_t absStride = stride < 0 ? -(int64_t)stride : stride;
+	if ((format < 0 || format > 2) || width <= 0 || height <= 0 ||
+		rowBytes > INT_MAX || rowBytes * height > INT_MAX ||
+		(buffer && (absStride < rowBytes || absStride > INT_MAX || absStride * height > PTRDIFF_MAX ||
+		(format == 1 && ((uintptr_t)buffer % sizeof(float) || stride % (int)sizeof(float)))))) {
+		setError("Invalid image layout: %dx%d stride=%d format=%d", width, height, stride, format);
+		return 0;
+	}
+	return 1;
+}
+
+static enum AVPixelFormat outputFormatPixelFormat(int outputFormat)
+{
+	if (outputFormat == 2) return AV_PIX_FMT_RGBA64;
+
+	return AV_PIX_FMT_RGBA;
+}
+
+static const char* outputFormatName(int outputFormat)
+{
+	if (outputFormat == 2) return "rgba-uint16";
+	if (outputFormat == 1) {
+		return "rgba-float32";
+	}
+	return "rgba-uint8";
+}
+
+static int convertFrameToBufferSized(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride, int outputFormat, int outputWidth, int outputHeight)
+{
+	/* sws_getContext cannot output packed RGBA float. Preserve 16-bit source
+	 * precision with native-endian RGBA64, then normalize into Fusion floats. */
+	if (outputFormat == 1) {
+		int width = outputWidth > 0 ? outputWidth : dec->width;
+		int height = outputHeight > 0 ? outputHeight : dec->height;
+		if (!dstBuffer || !validLayout(width, height, dstLineStride, 1, dstBuffer)) return 0;
+		size_t needed = (size_t)width * height * 8;
+		if (needed > dec->float_staging_size) {
+			uint16_t* next = (uint16_t*)realloc(dec->float_staging, needed);
+			if (!next) {
+				setError("Could not allocate Float32 staging buffer");
+				return 0;
+			}
+			dec->float_staging = next;
+			dec->float_staging_size = needed;
+		}
+		if (!convertFrameToBufferSized(dec, (uint8_t*)dec->float_staging, width * 8, 2, width, height)) return 0;
+		for (int y = 0; y < height; y++) {
+			const uint16_t* src = dec->float_staging + (size_t)y * width * 4;
+			float* dst = (float*)(dstBuffer + (ptrdiff_t)y * dstLineStride);
+			for (int x = 0; x < width * 4; x++) dst[x] = (float)src[x] / 65535.0f;
+		}
+		return 1;
+	}
+
+	AVFrame* srcFrame = dec->frame;
+
+	/* Hardware-decoded frames live in GPU memory; pull them down to a CPU frame
+	 * (typically NV12) before swscale converts to RGBA. */
+	if (dec->using_hw && dec->sw_frame && dec->frame->format == dec->hw_pix_fmt) {
+		gApi.av_frame_unref(dec->sw_frame);
+		int xfer = gApi.av_hwframe_transfer_data(dec->sw_frame, dec->frame, 0);
+		if (xfer < 0) {
+			char err[256];
+			formatAvError(xfer, err, sizeof(err));
+			setError("Hardware frame transfer failed: %s", err);
+			return 0;
+		}
+		srcFrame = dec->sw_frame;
+	}
+
+	int width = srcFrame->width > 0 ? srcFrame->width : dec->width;
+	int height = srcFrame->height > 0 ? srcFrame->height : dec->height;
+	enum AVPixelFormat sourceFormat = (enum AVPixelFormat)srcFrame->format;
+	enum AVPixelFormat destFormat = outputFormatPixelFormat(outputFormat);
+
+	if (width <= 0 || height <= 0) {
+		setError("Decoded frame has invalid size %dx%d", width, height);
+		return 0;
+	}
+	if (destFormat == AV_PIX_FMT_NONE) {
+		setError("Output format %s is not supported by this bridge build", outputFormatName(outputFormat));
+		return 0;
+	}
+	int destWidth = outputWidth > 0 ? outputWidth : dec->width;
+	int destHeight = outputHeight > 0 ? outputHeight : dec->height;
+	if (destWidth <= 0 || destHeight <= 0) {
+		setError("Output size is invalid: %dx%d", destWidth, destHeight);
+		return 0;
+	}
+
+	if (!validLayout(destWidth, destHeight, dstLineStride, outputFormat, dstBuffer)) return 0;
+
+	if (!dstBuffer) {
+		if (outputFormat != 0) {
+			setError("Buffered decode only supports rgba-uint8 output");
+			return 0;
+		}
+		int needed = destWidth * destHeight * 4;
+		if (!dec->rgba || dec->rgba_size < needed) {
+			uint8_t* next = (uint8_t*)realloc(dec->rgba, (size_t)needed);
+			if (!next) {
+				setError("Could not allocate %d bytes for RGBA frame", needed);
+				return 0;
+			}
+			dec->rgba = next;
+			dec->rgba_size = needed;
+		}
+
+		dstBuffer = dec->rgba;
+		dstLineStride = destWidth * 4;
+	}
+
+	if (!dec->sws || dec->sws_source_width != width || dec->sws_source_height != height || dec->sws_dest_width != destWidth || dec->sws_dest_height != destHeight || dec->sws_source_format != sourceFormat || dec->sws_dest_format != destFormat) {
+		if (dec->sws) {
+			gApi.sws_freeContext(dec->sws);
+			dec->sws = NULL;
+		}
+
+		dec->sws = gApi.sws_getContext(width, height, sourceFormat, destWidth, destHeight, destFormat, SWS_BILINEAR, NULL, NULL, NULL);
+		if (!dec->sws) {
+			setError("Could not create swscale context for %s", outputFormatName(outputFormat));
+			return 0;
+		}
+
+		dec->sws_source_width = width;
+		dec->sws_source_height = height;
+		dec->sws_dest_width = destWidth;
+		dec->sws_dest_height = destHeight;
+		dec->sws_source_format = sourceFormat;
+		dec->sws_dest_format = destFormat;
+		const char* pixName = gApi.av_get_pix_fmt_name(sourceFormat);
+		copyString(dec->pixel_format, sizeof(dec->pixel_format), pixName ? pixName : "unknown");
+	}
+
+	const AVPixFmtDescriptor* sourceDesc = gApi.av_pix_fmt_desc_get(sourceFormat);
+	if (sourceDesc && !(sourceDesc->flags & AV_PIX_FMT_FLAG_RGB)) {
+		int matrix = SWS_CS_DEFAULT;
+		switch (dec->frame->colorspace) {
+			case AVCOL_SPC_BT709: matrix = SWS_CS_ITU709; break;
+			case AVCOL_SPC_FCC: matrix = SWS_CS_FCC; break;
+			case AVCOL_SPC_SMPTE240M: matrix = SWS_CS_SMPTE240M; break;
+			case AVCOL_SPC_BT2020_NCL: matrix = SWS_CS_BT2020; break;
+			default: break;
+		}
+		const int* coefficients = gApi.sws_getCoefficients(matrix);
+		int fullRange = dec->frame->color_range == AVCOL_RANGE_JPEG ||
+			sourceFormat == AV_PIX_FMT_YUVJ420P || sourceFormat == AV_PIX_FMT_YUVJ422P ||
+			sourceFormat == AV_PIX_FMT_YUVJ444P || sourceFormat == AV_PIX_FMT_YUVJ440P;
+		if (gApi.sws_setColorspaceDetails(dec->sws, coefficients, fullRange,
+			coefficients, 1, 0, 1 << 16, 1 << 16) < 0) {
+			setError("Could not configure source color matrix and range");
+			return 0;
+		}
+	}
+
+	uint8_t* dstData[4] = {dstBuffer, NULL, NULL, NULL};
+	int dstStride[4] = {dstLineStride, 0, 0, 0};
+	int scaled = gApi.sws_scale(dec->sws, (const uint8_t* const*)srcFrame->data, srcFrame->linesize, 0, height, dstData, dstStride);
+	dec->last_scaled_rows = scaled;
+	if (scaled <= 0) {
+		setError("swscale produced no output");
+		return 0;
+	}
+	if (scaled < destHeight) {
+		setError("swscale produced only %d of %d rows", scaled, destHeight);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int convertFrameToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride, int outputFormat)
+{
+	return convertFrameToBufferSized(dec, dstBuffer, dstLineStride, outputFormat, 0, 0);
+}
+
+static int convertFrame(TlavDecoder* dec)
+{
+	dec->rgba_valid = convertFrameToBuffer(dec, NULL, 0, 0);
+	return dec->rgba_valid;
+}
+
+static int copyRgbaCacheToBuffer(TlavDecoder* dec, uint8_t* dstBuffer, int dstLineStride)
+{
+	if (!dec || !dec->rgba || !dstBuffer || dec->width <= 0 || dec->height <= 0) {
+		setError("No cached RGBA frame available");
+		return 0;
+	}
+
+	int rowBytes = dec->width * 4;
+	for (int y = 0; y < dec->height; y++) {
+		memcpy(dstBuffer + ((ptrdiff_t)y * dstLineStride), dec->rgba + ((ptrdiff_t)y * rowBytes), (size_t)rowBytes);
+	}
+
+	return 1;
+}
+
+static void fillDirectOutFrame(TlavFrame* outFrame, uint8_t* dstBuffer, int dstLineStride, int width, int height, int64_t frameIndex)
+{
+	outFrame->data = dstBuffer;
+	outFrame->width = width;
+	outFrame->height = height;
+	outFrame->stride = dstLineStride;
+	outFrame->frame_index = frameIndex;
+}
+
+TLAV_EXPORT void tlav_set_library_dir(const char* dir)
+{
+	lockMutex();
+	copyString(gLibraryDir, sizeof(gLibraryDir), dir);
+	unlockMutex();
+}
+
+TLAV_EXPORT const char* tlav_version(void)
+{
+	lockMutex();
+	if (!loadApi()) {
+		unlockMutex();
+		return "bridge loaded, libav unavailable";
+	}
+
+	static TLAV_THREAD_LOCAL char version[192];
+	snprintf(version, sizeof(version), "bridge 1.5.0 (build %s), libav %s",
+		TLAV_BUILD_ID,
+		gApi.av_version_info ? gApi.av_version_info() : "unknown");
+	version[sizeof(version) - 1] = '\0';
+	unlockMutex();
+	return version;
+}
+
+TLAV_EXPORT const char* tlav_last_error(void)
+{
+	return gLastError;
+}
+
+TLAV_EXPORT const char* tlav_last_debug(void)
+{
+	return gLastDebug;
+}
+
+/* Name of the active hardware decode backend (e.g. "cuda", "vaapi"), or "" when
+ * decoding in software. Returns a pointer into stable decoder state. */
+TLAV_EXPORT const char* tlav_hw_accel(void* handle)
+{
+	TlavDecoder* dec = (TlavDecoder*)handle;
+	return (dec && dec->using_hw) ? dec->hw_name : "";
+}
+
+TLAV_EXPORT void* tlav_open(const char* path, TlavInfo* info)
+{
+	lockMutex();
+	clearError();
+
+	if (!path || path[0] == '\0') {
+		setError("Input path is empty");
+		setDebug("open failed empty-path");
+		unlockMutex();
+		return NULL;
+	}
+
+	if (!loadApi()) {
+		setDebug("open failed load-api path=%s error=%s", path, gLastError);
+		unlockMutex();
+		return NULL;
+	}
+
+	TlavDecoder* dec = (TlavDecoder*)calloc(1, sizeof(TlavDecoder));
+	if (!dec) {
+		setError("Could not allocate decoder state");
+		setDebug("open failed allocate-decoder path=%s", path);
+		unlockMutex();
+		return NULL;
+	}
+	if (!initDecoderMutex(dec)) {
+		setError("Could not initialize decoder lock");
+		setDebug("open failed init-lock path=%s", path);
+		free(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->stream_index = -1;
+	dec->current_frame = -1;
+	dec->start_time = AV_NOPTS_VALUE;
+	dec->sws_source_format = AV_PIX_FMT_NONE;
+	dec->sws_dest_format = AV_PIX_FMT_NONE;
+	dec->hw_pix_fmt = AV_PIX_FMT_NONE;
+
+	int ret = gApi.avformat_open_input(&dec->format, path, NULL, NULL);
+	if (ret < 0) {
+		char err[256];
+		formatAvError(ret, err, sizeof(err));
+		setError("Could not open input: %s", err);
+		setDebug("open failed avformat-open path=%s error=%s", path, err);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	ret = gApi.avformat_find_stream_info(dec->format, NULL);
+	if (ret < 0) {
+		char err[256];
+		formatAvError(ret, err, sizeof(err));
+		setError("Could not read stream info: %s", err);
+		setDebug("open failed stream-info path=%s error=%s", path, err);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->stream_index = gApi.av_find_best_stream(dec->format, AVMEDIA_TYPE_VIDEO, -1, -1, &dec->decoder, 0);
+	if (dec->stream_index < 0) {
+		setError("No video stream found");
+		setDebug("open failed no-video-stream path=%s", path);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->stream = dec->format->streams[dec->stream_index];
+	if (!dec->decoder) {
+		dec->decoder = gApi.avcodec_find_decoder(dec->stream->codecpar->codec_id);
+	}
+	if (!dec->decoder) {
+		setError("No decoder found for video stream");
+		setDebug("open failed no-decoder path=%s stream=%d", path, dec->stream_index);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->codec = gApi.avcodec_alloc_context3(dec->decoder);
+	if (!dec->codec) {
+		setError("Could not allocate codec context");
+		setDebug("open failed allocate-codec path=%s stream=%d", path, dec->stream_index);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	ret = gApi.avcodec_parameters_to_context(dec->codec, dec->stream->codecpar);
+	if (ret < 0) {
+		char err[256];
+		formatAvError(ret, err, sizeof(err));
+		setError("Could not copy codec parameters: %s", err);
+		setDebug("open failed codec-parameters path=%s stream=%d error=%s", path, dec->stream_index, err);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	/* Attach a hardware device if one is available; harmless no-op otherwise.
+	 * Must happen before avcodec_open2 so get_format/hw_device_ctx take effect. */
+	setupHardware(dec);
+
+	ret = gApi.avcodec_open2(dec->codec, dec->decoder, NULL);
+	if (ret < 0) {
+		char err[256];
+		formatAvError(ret, err, sizeof(err));
+		setError("Could not open decoder: %s", err);
+		setDebug("open failed codec-open path=%s stream=%d codec=%s error=%s", path, dec->stream_index, dec->decoder->name ? dec->decoder->name : "unknown", err);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->packet = gApi.av_packet_alloc();
+	dec->frame = gApi.av_frame_alloc();
+	if (!dec->packet || !dec->frame) {
+		setError("Could not allocate decode packet/frame");
+		setDebug("open failed allocate-packet-frame path=%s stream=%d", path, dec->stream_index);
+		closeDecoder(dec);
+		unlockMutex();
+		return NULL;
+	}
+
+	dec->width = dec->codec->width > 0 ? dec->codec->width : dec->stream->codecpar->width;
+	dec->height = dec->codec->height > 0 ? dec->codec->height : dec->stream->codecpar->height;
+	dec->time_base = dec->stream->time_base;
+	dec->start_time = dec->stream->start_time;
+	dec->fps = rationalToDouble(dec->stream->avg_frame_rate);
+	if (dec->fps <= 0.0) {
+		dec->fps = rationalToDouble(dec->stream->r_frame_rate);
+	}
+	if (dec->fps <= 0.0) {
+		dec->fps = 24.0;
+	}
+
+	if (dec->stream->duration != AV_NOPTS_VALUE && rationalToDouble(dec->time_base) > 0.0) {
+		dec->duration = (double)dec->stream->duration * rationalToDouble(dec->time_base);
+	} else if (dec->format->duration != AV_NOPTS_VALUE) {
+		dec->duration = (double)dec->format->duration / (double)AV_TIME_BASE;
+	}
+
+	if (dec->stream->nb_frames > 0) {
+		dec->frame_count = dec->stream->nb_frames;
+	} else if (dec->duration > 0.0 && dec->fps > 0.0) {
+		dec->frame_count = roundDoubleToInt64(dec->duration * dec->fps);
+	}
+
+	copyString(dec->codec_name, sizeof(dec->codec_name), gApi.avcodec_get_name(dec->stream->codecpar->codec_id));
+	const char* pixName = gApi.av_get_pix_fmt_name(dec->codec->pix_fmt);
+	copyString(dec->pixel_format, sizeof(dec->pixel_format), pixName ? pixName : "unknown");
+	copyString(dec->format_name, sizeof(dec->format_name), dec->format->iformat && dec->format->iformat->name ? dec->format->iformat->name : "unknown");
+
+	fillInfo(dec, info);
+	setDebug("open path=%s stream=%d size=%dx%d fps=%.9g frames=%lld duration=%.9g codec=%s pix=%s format=%s hw=%s",
+		path,
+		dec->stream_index,
+		dec->width,
+		dec->height,
+		dec->fps,
+		(long long)dec->frame_count,
+		dec->duration,
+		dec->codec_name,
+		dec->pixel_format,
+		dec->format_name,
+		dec->using_hw ? dec->hw_name : "off");
+	unlockMutex();
+	return dec;
+}
+
+TLAV_EXPORT int tlav_decode(void* handle, int64_t frameIndex, TlavFrame* outFrame)
+{
+	clearError();
+
+	TlavDecoder* dec = (TlavDecoder*)handle;
+	int64_t requestedFrame = frameIndex;
+	if (!dec || !outFrame) {
+		setError("Decode called with invalid handle");
+		setDebug("decode failed invalid-handle requested=%lld", (long long)requestedFrame);
+		return 0;
+	}
+
+	lockDecoder(dec);
+	int64_t currentBefore = dec->current_frame;
+
+	if (frameIndex < 0) {
+		frameIndex = 0;
+	}
+	if (dec->frame_count > 0 && frameIndex >= dec->frame_count) {
+		frameIndex = dec->frame_count - 1;
+	}
+
+	if (dec->rgba_valid && frameIndex == dec->current_frame) {
+		outFrame->data = dec->rgba;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dec->width * 4;
+		outFrame->frame_index = dec->current_frame;
+		setDebug("decode cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height);
+		unlockDecoder(dec);
+		return 1;
+	}
+
+	if (dec->frame_valid && !dec->rgba_valid && frameIndex == dec->current_frame) {
+		if (!convertFrame(dec)) {
+			setDebug("decode current-frame-convert-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		outFrame->data = dec->rgba;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dec->width * 4;
+		outFrame->frame_index = dec->current_frame;
+		setDebug("decode current-frame-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height);
+		unlockDecoder(dec);
+		return 1;
+	}
+
+	int didSeek = 0;
+	if (frameIndex < dec->current_frame || (!dec->frame_valid && frameIndex == dec->current_frame) || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
+		if (!seekDecoder(dec, frameIndex)) {
+			setDebug("decode seek-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+		didSeek = 1;
+	}
+
+	int skippedFrames = 0;
+	while (1) {
+		if (!receiveNextFrame(dec)) {
+			if (gLastError[0] == '\0') {
+				setError("No decoded frame available");
+			}
+			setDebug("decode failed-no-frame requested=%lld clamped=%lld currentBefore=%lld seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		int64_t decodedIndex = dec->current_frame + 1;
+		int hasTimestampIndex = 0;
+		if (dec->index_pending) {
+			hasTimestampIndex = estimateFrameIndex(dec, &decodedIndex);
+			dec->index_pending = 0;
+		}
+		dec->current_frame = decodedIndex;
+		if (hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+		if (!hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+
+		if (!convertFrame(dec)) {
+			setDebug("decode convert-failed requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				(long long)decodedIndex,
+				hasTimestampIndex,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		dec->current_frame = decodedIndex;
+		outFrame->data = dec->rgba;
+		outFrame->width = dec->width;
+		outFrame->height = dec->height;
+		outFrame->stride = dec->width * 4;
+		outFrame->frame_index = decodedIndex;
+		setDebug("decode converted requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)decodedIndex,
+			hasTimestampIndex,
+			didSeek,
+			skippedFrames,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height,
+			dec->last_scaled_rows);
+		unlockDecoder(dec);
+		return 1;
+	}
+}
+
+static int decodeIntoFormat(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame, int outputFormat, int outputWidth, int outputHeight)
+{
+	clearError();
+
+	TlavDecoder* dec = (TlavDecoder*)handle;
+	int64_t requestedFrame = frameIndex;
+	if (!dec || !outFrame || !dstBuffer || dstLineStride == 0) {
+		setError("Direct decode called with invalid handle or destination");
+		setDebug("decode-into failed invalid-args requested=%lld dst=%p stride=%d", (long long)requestedFrame, (void*)dstBuffer, dstLineStride);
+		return 0;
+	}
+
+	lockDecoder(dec);
+	int64_t currentBefore = dec->current_frame;
+
+	if (frameIndex < 0) {
+		frameIndex = 0;
+	}
+	if (dec->frame_count > 0 && frameIndex >= dec->frame_count) {
+		frameIndex = dec->frame_count - 1;
+	}
+	if (outputWidth <= 0) {
+		outputWidth = dec->width;
+	}
+	if (outputHeight <= 0) {
+		outputHeight = dec->height;
+	}
+	if (outputWidth <= 0 || outputHeight <= 0) {
+		setError("Direct decode output size is invalid: %dx%d", outputWidth, outputHeight);
+		unlockDecoder(dec);
+		return 0;
+	}
+	if ((outputFormat != 0 && outputFormat != 1)) {
+		setError("Unsupported output format %d", outputFormat);
+		unlockDecoder(dec);
+		return 0;
+	}
+	if (!validLayout(outputWidth, outputHeight, dstLineStride, outputFormat, dstBuffer)) {
+		unlockDecoder(dec);
+		return 0;
+	}
+	int isNativeSize = outputWidth == dec->width && outputHeight == dec->height;
+
+	if (isNativeSize && outputFormat == 0 && dec->rgba_valid && frameIndex == dec->current_frame) {
+		if (!copyRgbaCacheToBuffer(dec, dstBuffer, dstLineStride)) {
+			setDebug("decode-into cache-copy-failed requested=%lld clamped=%lld error=%s", (long long)requestedFrame, (long long)frameIndex, gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		fillDirectOutFrame(outFrame, dstBuffer, dstLineStride, outputWidth, outputHeight, dec->current_frame);
+		setDebug("decode-into cache-hit requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d",
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height);
+		unlockDecoder(dec);
+		return 1;
+	}
+
+	if (dec->frame_valid && frameIndex == dec->current_frame) {
+		if (!convertFrameToBufferSized(dec, dstBuffer, dstLineStride, outputFormat, outputWidth, outputHeight)) {
+			setDebug("decode-into current-frame-convert-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		fillDirectOutFrame(outFrame, dstBuffer, dstLineStride, outputWidth, outputHeight, dec->current_frame);
+		setDebug("decode-into current-frame-hit format=%s requested=%lld clamped=%lld currentBefore=%lld returned=%lld size=%dx%d stride=%d swsRows=%d dst=%p",
+			outputFormatName(outputFormat),
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height,
+			outFrame->stride,
+			dec->last_scaled_rows,
+			(void*)dstBuffer);
+		unlockDecoder(dec);
+		return 1;
+	}
+
+	int didSeek = 0;
+	if (frameIndex < dec->current_frame || (!dec->frame_valid && frameIndex == dec->current_frame) || frameIndex - dec->current_frame > 90 || (dec->current_frame < 0 && frameIndex > 30)) {
+		if (!seekDecoder(dec, frameIndex)) {
+			setDebug("decode-into seek-failed requested=%lld clamped=%lld currentBefore=%lld error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+		didSeek = 1;
+	}
+
+	int skippedFrames = 0;
+	while (1) {
+		if (!receiveNextFrame(dec)) {
+			if (gLastError[0] == '\0') {
+				setError("No decoded frame available");
+			}
+			setDebug("decode-into failed-no-frame requested=%lld clamped=%lld currentBefore=%lld seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		int64_t decodedIndex = dec->current_frame + 1;
+		int hasTimestampIndex = 0;
+		if (dec->index_pending) {
+			hasTimestampIndex = estimateFrameIndex(dec, &decodedIndex);
+			dec->index_pending = 0;
+		}
+		dec->current_frame = decodedIndex;
+		if (hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+		if (!hasTimestampIndex && decodedIndex < frameIndex) {
+			dec->current_frame = decodedIndex;
+			skippedFrames++;
+			continue;
+		}
+
+		if (!convertFrameToBufferSized(dec, dstBuffer, dstLineStride, outputFormat, outputWidth, outputHeight)) {
+			setDebug("decode-into convert-failed requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d error=%s",
+				(long long)requestedFrame,
+				(long long)frameIndex,
+				(long long)currentBefore,
+				(long long)decodedIndex,
+				hasTimestampIndex,
+				didSeek,
+				skippedFrames,
+				gLastError);
+			unlockDecoder(dec);
+			return 0;
+		}
+
+		dec->current_frame = decodedIndex;
+		fillDirectOutFrame(outFrame, dstBuffer, dstLineStride, outputWidth, outputHeight, decodedIndex);
+		setDebug("decode-into converted format=%s requested=%lld clamped=%lld currentBefore=%lld decoded=%lld hasTimestamp=%d seek=%d skipped=%d returned=%lld size=%dx%d swsRows=%d",
+			outputFormatName(outputFormat),
+			(long long)requestedFrame,
+			(long long)frameIndex,
+			(long long)currentBefore,
+			(long long)decodedIndex,
+			hasTimestampIndex,
+			didSeek,
+			skippedFrames,
+			(long long)outFrame->frame_index,
+			outFrame->width,
+			outFrame->height,
+			dec->last_scaled_rows);
+		unlockDecoder(dec);
+		return 1;
+	}
+}
+
+TLAV_EXPORT int tlav_decode_into(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame)
+{
+	return decodeIntoFormat(handle, frameIndex, dstBuffer, dstLineStride, outFrame, 0, 0, 0);
+}
+
+TLAV_EXPORT int tlav_decode_into_format(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame, int outputFormat)
+{
+	return decodeIntoFormat(handle, frameIndex, dstBuffer, dstLineStride, outFrame, outputFormat, 0, 0);
+}
+
+TLAV_EXPORT int tlav_decode_into_scaled(void* handle, int64_t frameIndex, uint8_t* dstBuffer, int dstLineStride, TlavFrame* outFrame, int outputFormat, int outputWidth, int outputHeight)
+{
+	return decodeIntoFormat(handle, frameIndex, dstBuffer, dstLineStride, outFrame, outputFormat, outputWidth, outputHeight);
+}
+
+TLAV_EXPORT int tlav_blend_rgba(uint8_t* dstBuffer, int dstLineStride, const uint8_t* srcBuffer, int srcLineStride,
+	int width, int height, int outputFormat, double factor)
+{
+	if (!dstBuffer || !srcBuffer || width <= 0 || height <= 0 || dstLineStride == 0 || srcLineStride == 0 ||
+		!(factor >= 0.0 && factor <= 1.0)) {
+		setError("Invalid linear blend arguments");
+		return 0;
+	}
+
+	if (outputFormat != 0 && outputFormat != 1) {
+		setError("Unsupported blend format %d", outputFormat);
+		return 0;
+	}
+	if (!validLayout(width, height, dstLineStride, outputFormat, dstBuffer) ||
+		!validLayout(width, height, srcLineStride, outputFormat, srcBuffer)) return 0;
+
+	double inverseFactor = 1.0 - factor;
+	int componentCount = width * 4;
+	for (int y = 0; y < height; y++) {
+		uint8_t* dstRow = dstBuffer + ((ptrdiff_t)y * dstLineStride);
+		const uint8_t* srcRow = srcBuffer + ((ptrdiff_t)y * srcLineStride);
+		if (outputFormat == 0) {
+			for (int x = 0; x < componentCount; x++) {
+				dstRow[x] = (uint8_t)(dstRow[x] * inverseFactor + srcRow[x] * factor + 0.5);
+			}
+		} else if (outputFormat == 1) {
+			float* dstPixels = (float*)dstRow;
+			const float* srcPixels = (const float*)srcRow;
+			for (int x = 0; x < componentCount; x++) {
+				dstPixels[x] = (float)(dstPixels[x] * inverseFactor + srcPixels[x] * factor);
+			}
+		} else {
+			setError("Unsupported linear blend output format: %d", outputFormat);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
+TLAV_EXPORT void tlav_close(void* handle)
+{
+	closeDecoder((TlavDecoder*)handle);
+}

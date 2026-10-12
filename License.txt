@@ -1,0 +1,31 @@
+Copyright (c) 2026 Tangenten.
+
+This library is free software; you can redistribute it and/or
+modify it under the terms of the GNU Lesser General Public
+License as published by the Free Software Foundation; either
+version 2.1 of the License, or (at your option) any later version.
+
+This library is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+Lesser General Public License for more details.
+
+You should have received a copy of the GNU Lesser General Public
+License along with this library; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
+USA.
+
+---
+
+FFmpeg/libav notice
+-------------------
+
+The bridge (libav_bridge.c) includes FFmpeg/libav header files at
+compile time via the public libav API.  FFmpeg/libav is licensed under LGPL or
+GPL terms depending on the build configuration (see https://ffmpeg.org/legal).
+The bridge does not bundle, link against, or distribute FFmpeg/libav runtime
+binaries.
+
+The fuse script (Loader_FFmpeg.fuse) and Lua FFI loader (LibAV_FFI.lua) do not
+link against or include FFmpeg in any form; they are independent Lua software
+licensed under LGPL-2.1-or-later.

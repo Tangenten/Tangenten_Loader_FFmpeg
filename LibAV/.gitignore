@@ -1,0 +1,27 @@
+# Compiled bridge binaries (rebuilt from source)
+**/libav_bridge.so*
+**/libav_bridge.dylib
+**/libav_bridge.dll
+
+# FFmpeg/libav runtime libraries (user-supplied)
+**/libavutil*.so*
+**/libavcodec*.so*
+**/libavformat*.so*
+**/libavdevice*.so*
+**/libavfilter*.so*
+**/libswscale*.so*
+**/libswresample*.so*
+**/libavutil*.dylib
+**/libavcodec*.dylib
+**/libavformat*.dylib
+**/libavdevice*.dylib
+**/libavfilter*.dylib
+**/libswscale*.dylib
+**/libswresample*.dylib
+**/avcodec-*.dll
+**/avdevice-*.dll
+**/avfilter-*.dll
+**/avformat-*.dll
+**/avutil-*.dll
+**/swscale-*.dll
+**/swresample-*.dll
